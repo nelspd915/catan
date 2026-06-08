@@ -6,6 +6,7 @@ Basic setup and usage instructions for this project.
 
 - [Git](https://git-scm.com/)
 - A recent version of [Node.js](https://nodejs.org/) and [pnpm](https://pnpm.io/)
+- [Rust](https://www.rust-lang.org/tools/install)
 
 ## Getting Started
 
