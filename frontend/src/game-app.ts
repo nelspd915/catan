@@ -2,6 +2,7 @@ import { LitElement, css, html } from "lit";
 import { customElement, state } from "lit/decorators.js";
 
 type ResourceName = "Brick" | "Lumber" | "Wool" | "Grain" | "Ore";
+type BuildingName = "Road" | "Settlement" | "City";
 
 const RESOURCE_NAMES: ResourceName[] = [
   "Brick",
@@ -10,6 +11,8 @@ const RESOURCE_NAMES: ResourceName[] = [
   "Grain",
   "Ore",
 ];
+
+const BUILDING_NAMES: BuildingName[] = ["Road", "Settlement", "City"];
 
 type HealthResponse = {
   status: string;
@@ -74,6 +77,8 @@ export class GameApp extends LitElement {
   @state() private grantPlayerId = 1;
   @state() private grantResource: ResourceName = "Brick";
   @state() private grantAmount = 1;
+  @state() private purchasePlayerId = 1;
+  @state() private purchaseBuilding: BuildingName = "Road";
 
   @state() private busy = false;
   @state() private status = "Ready to create a table.";
@@ -244,6 +249,45 @@ export class GameApp extends LitElement {
                 Grant
               </button>
             </article>
+
+            <article class="card stack">
+              <h3>Buy Building</h3>
+              <label>
+                Player
+                <select
+                  .value=${String(this.purchasePlayerId)}
+                  @change=${this.onPurchasePlayerChange}
+                >
+                  ${players.length === 0
+                    ? html`<option value="1">1</option>`
+                    : players.map(
+                        (player) =>
+                          html`<option value=${String(player.id)}>
+                            ${player.id} - ${player.name}
+                          </option>`,
+                      )}
+                </select>
+              </label>
+              <label>
+                Building
+                <select
+                  .value=${this.purchaseBuilding}
+                  @change=${this.onPurchaseBuildingChange}
+                >
+                  ${BUILDING_NAMES.map(
+                    (building) =>
+                      html`<option value=${building}>${building}</option>`,
+                  )}
+                </select>
+              </label>
+              <button ?disabled=${this.busy} @click=${this.handleBuyBuilding}>
+                Buy
+              </button>
+              <p class="cost-note">
+                Road: Brick + Lumber. Settlement: Brick + Lumber + Wool + Grain.
+                City: 2 Grain + 3 Ore.
+              </p>
+            </article>
           </aside>
         </section>
 
@@ -410,6 +454,17 @@ export class GameApp extends LitElement {
     });
   }
 
+  private async handleBuyBuilding(): Promise<void> {
+    await this.runAction("Buy building", async () => {
+      await this.sendCommandInternal({
+        BuyBuilding: {
+          player_id: this.purchasePlayerId,
+          building: this.purchaseBuilding,
+        },
+      });
+    });
+  }
+
   private async handleQuickSetup(): Promise<void> {
     await this.runAction("Quick setup", async () => {
       const response = await this.createGameInternal();
@@ -459,6 +514,7 @@ export class GameApp extends LitElement {
     this.state = state;
     if (state.players.length > 0) {
       this.grantPlayerId = state.players[0].id;
+      this.purchasePlayerId = state.players[0].id;
     }
   }
 
@@ -639,6 +695,20 @@ export class GameApp extends LitElement {
     }
   }
 
+  private onPurchasePlayerChange(event: Event): void {
+    this.purchasePlayerId = this.parsePositiveInt(
+      (event.target as HTMLSelectElement).value,
+      1,
+    );
+  }
+
+  private onPurchaseBuildingChange(event: Event): void {
+    const value = (event.target as HTMLSelectElement).value;
+    if (this.isBuildingName(value)) {
+      this.purchaseBuilding = value;
+    }
+  }
+
   private onGrantAmountInput(event: Event): void {
     this.grantAmount = this.parsePositiveInt(
       (event.target as HTMLInputElement).value,
@@ -656,6 +726,10 @@ export class GameApp extends LitElement {
 
   private isResourceName(value: string): value is ResourceName {
     return RESOURCE_NAMES.includes(value as ResourceName);
+  }
+
+  private isBuildingName(value: string): value is BuildingName {
+    return BUILDING_NAMES.includes(value as BuildingName);
   }
 
   static styles = css`
@@ -1072,6 +1146,13 @@ export class GameApp extends LitElement {
       margin: 0;
       color: #4f586d;
       font-size: 0.9rem;
+    }
+
+    .cost-note {
+      margin: 0;
+      font-size: 0.78rem;
+      color: #4b566d;
+      line-height: 1.35;
     }
 
     @media (max-width: 1000px) {

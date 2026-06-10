@@ -7,7 +7,9 @@
 use crate::command::Command;
 use crate::error::EngineError;
 use crate::event::Event;
-use crate::model::{Direction, GameConfig, GamePhase, GameState, Player, PlayerId};
+use crate::model::{
+    Building, Direction, GameConfig, GamePhase, GameState, Player, PlayerId, Resource,
+};
 
 /// Stateful engine facade used by server-side game sessions.
 ///
@@ -46,6 +48,10 @@ impl Engine {
                 resource,
                 amount,
             } => self.grant_resource(state, player_id, resource, amount)?,
+            Command::BuyBuilding {
+                player_id,
+                building,
+            } => self.buy_building(state, player_id, building)?,
         };
 
         // Monotonic versioning helps synchronization and deterministic replay.
@@ -163,7 +169,7 @@ impl Engine {
         &self,
         state: &mut GameState,
         player_id: PlayerId,
-        resource: crate::model::Resource,
+        resource: Resource,
         amount: u8,
     ) -> Result<Vec<Event>, EngineError> {
         // Resource transfer is not legal outside active gameplay.
@@ -189,5 +195,82 @@ impl Engine {
             resource,
             amount,
         }])
+    }
+
+    /// Purchase one building piece by paying resource costs.
+    fn buy_building(
+        &self,
+        state: &mut GameState,
+        player_id: PlayerId,
+        building: Building,
+    ) -> Result<Vec<Event>, EngineError> {
+        if !matches!(state.phase, GamePhase::MainTurn) {
+            return Err(EngineError::InvalidPhase {
+                phase: state.phase.clone(),
+            });
+        }
+
+        let cost = Self::building_cost(building);
+
+        {
+            let player = state
+                .player_mut(player_id)
+                .ok_or(EngineError::PlayerNotFound { player_id })?;
+
+            for (resource, required) in &cost {
+                let available = player.resources.amount(*resource);
+                if available < *required {
+                    return Err(EngineError::InsufficientResources {
+                        player_id,
+                        resource: *resource,
+                        required: *required,
+                        available,
+                    });
+                }
+            }
+
+            let pieces_left = match building {
+                Building::Road => &mut player.roads_left,
+                Building::Settlement => &mut player.settlements_left,
+                Building::City => &mut player.cities_left,
+            };
+
+            if *pieces_left == 0 {
+                return Err(EngineError::NoPiecesRemaining {
+                    player_id,
+                    building,
+                });
+            }
+
+            for (resource, amount) in &cost {
+                let removed = player.resources.remove(*resource, *amount);
+                debug_assert!(removed, "resource pre-check should guarantee removal");
+            }
+
+            *pieces_left -= 1;
+        }
+
+        for (resource, amount) in &cost {
+            state.bank.add(*resource, *amount);
+        }
+
+        Ok(vec![Event::BuildingPurchased {
+            player_id,
+            building,
+        }])
+    }
+
+    /// Return resource cost for one building purchase.
+    fn building_cost(building: Building) -> Vec<(Resource, u8)> {
+        match building {
+            Building::Road => vec![(Resource::Brick, 1), (Resource::Lumber, 1)],
+            Building::Settlement => vec![
+                (Resource::Brick, 1),
+                (Resource::Lumber, 1),
+                (Resource::Wool, 1),
+                (Resource::Grain, 1),
+            ],
+            Building::City => vec![(Resource::Grain, 2), (Resource::Ore, 3)],
+        }
     }
 }

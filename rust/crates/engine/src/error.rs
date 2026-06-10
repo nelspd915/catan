@@ -5,7 +5,7 @@
 
 use thiserror::Error;
 
-use crate::model::{GamePhase, PlayerId, Resource};
+use crate::model::{Building, GamePhase, PlayerId, Resource};
 
 /// Domain errors produced while validating or applying commands.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -34,4 +34,20 @@ pub enum EngineError {
     /// The state has no active turn owner when one is required.
     #[error("no active player available")]
     NoActivePlayer,
+    /// The player does not hold enough resource cards to pay a cost.
+    #[error(
+        "player {player_id} has insufficient {resource:?}: needs {required}, has {available}"
+    )]
+    InsufficientResources {
+        player_id: PlayerId,
+        resource: Resource,
+        required: u8,
+        available: u8,
+    },
+    /// The player has no remaining pieces of the requested building type.
+    #[error("player {player_id} has no {building:?} pieces remaining")]
+    NoPiecesRemaining {
+        player_id: PlayerId,
+        building: Building,
+    },
 }

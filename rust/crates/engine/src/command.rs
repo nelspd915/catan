@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{PlayerId, Resource};
+use crate::model::{Building, PlayerId, Resource};
 
 /// A request to mutate game state.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -38,5 +38,15 @@ pub enum Command {
         resource: Resource,
         /// Number of cards to transfer from bank to player.
         amount: u8,
+    },
+    /// Purchase one building piece by paying resource cost.
+    ///
+    /// Map placement is intentionally out of scope for this command; it only
+    /// validates payment and available piece counts.
+    BuyBuilding {
+        /// The player purchasing the piece.
+        player_id: PlayerId,
+        /// Building type to purchase.
+        building: Building,
     },
 }

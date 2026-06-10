@@ -94,6 +94,17 @@ pub enum Resource {
     Ore,
 }
 
+/// Buildable piece categories purchasable by players.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Building {
+    /// Road piece purchase.
+    Road,
+    /// Settlement piece purchase.
+    Settlement,
+    /// City piece purchase.
+    City,
+}
+
 /// Resource inventory keyed by resource type.
 ///
 /// Used for both player hands and the shared bank.
