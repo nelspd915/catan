@@ -45,5 +45,29 @@ cargo build
 2. Run the backend server:
 
 ```bash
-cargo run
+cargo run -p server
+```
+
+3. Call the API from your frontend or curl while the server is running on `http://127.0.0.1:3000`.
+
+Create a game:
+
+```bash
+curl -X POST http://127.0.0.1:3000/games \
+	-H "content-type: application/json" \
+	-d '{"game_id":"local-test","config":{"min_players":2,"max_players":4,"target_victory_points":10}}'
+```
+
+Apply a command:
+
+```bash
+curl -X POST http://127.0.0.1:3000/games/local-test/commands \
+	-H "content-type: application/json" \
+	-d '{"AddPlayer":{"id":1,"name":"Alice"}}'
+```
+
+Fetch state:
+
+```bash
+curl http://127.0.0.1:3000/games/local-test
 ```
