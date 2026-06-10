@@ -34,4 +34,11 @@ pub enum Event {
         /// The building category purchased.
         building: Building,
     },
+    /// The game has ended with a winner.
+    GameWon {
+        /// Winning player id.
+        player_id: PlayerId,
+        /// Winner's final victory point total.
+        victory_points: u8,
+    },
 }

@@ -77,10 +77,7 @@ export class GameApp extends LitElement {
   @state() private targetVictoryPoints = 10;
 
   @state() private joinName = "Alice";
-  @state() private grantPlayerId = 1;
-  @state() private grantResource: ResourceName = "Brick";
-  @state() private grantAmount = 1;
-  @state() private purchasePlayerId = 1;
+  @state() private perspectivePlayerId: number | null = null;
   @state() private purchaseBuilding: BuildingName = "Road";
 
   @state() private busy = false;
@@ -93,6 +90,10 @@ export class GameApp extends LitElement {
   render() {
     const activePlayerId = this.getActivePlayerId();
     const players = this.state?.players ?? [];
+    const perspectivePlayer = this.getPerspectivePlayer(players);
+    const phaseKey = this.phaseKey(this.state?.phase);
+    const isYourTurn =
+      perspectivePlayer !== null && perspectivePlayer.id === activePlayerId;
 
     return html`
       <main class="table-shell">
@@ -157,8 +158,8 @@ export class GameApp extends LitElement {
             <p class="value">${this.state?.version ?? 0}</p>
           </article>
           <article class="status-card card">
-            <p class="label">Active Player</p>
-            <p class="value">${this.playerNameFor(activePlayerId) ?? "-"}</p>
+            <p class="label">You</p>
+            <p class="value">${perspectivePlayer?.name ?? "Observer"}</p>
           </article>
         </section>
 
@@ -169,14 +170,32 @@ export class GameApp extends LitElement {
               ${this.renderHexTiles()}
             </div>
             <p class="board-note">
-              Spatial board interactions are not wired yet. This view tracks
-              table status and turn flow first.
+              Spatial board interactions are not wired yet. At each Begin Turn,
+              all players receive one of every resource as a temporary dice
+              simulation rule.
             </p>
           </article>
 
           <aside class="sidebar">
             <article class="card stack">
-              <h3>Join Table</h3>
+              <h3>Your Seat</h3>
+              <label>
+                Perspective
+                <select
+                  .value=${this.perspectivePlayerId === null
+                    ? ""
+                    : String(this.perspectivePlayerId)}
+                  @change=${this.onPerspectivePlayerChange}
+                >
+                  <option value="">Observer</option>
+                  ${players.map(
+                    (player) =>
+                      html`<option value=${String(player.id)}>
+                        ${player.id} - ${player.name}
+                      </option>`,
+                  )}
+                </select>
+              </label>
               <label>
                 Player Name
                 <input
@@ -193,84 +212,39 @@ export class GameApp extends LitElement {
             <article class="card stack">
               <h3>Turn Controls</h3>
               <div class="button-column">
-                <button ?disabled=${this.busy} @click=${this.handleStartGame}>
+                <button
+                  ?disabled=${this.busy || phaseKey !== "Lobby"}
+                  @click=${this.handleStartGame}
+                >
                   Start Game
                 </button>
                 <button
-                  ?disabled=${this.busy}
-                  @click=${this.handleAdvancePhase}
+                  ?disabled=${this.busy ||
+                  (phaseKey !== "Setup" && phaseKey !== "TurnStart") ||
+                  (phaseKey === "TurnStart" && !isYourTurn)}
+                  @click=${this.handleBeginTurnOrSetup}
                 >
-                  Advance Phase
+                  ${phaseKey === "TurnStart"
+                    ? "Begin Turn (Income)"
+                    : "Advance Setup"}
                 </button>
-                <button ?disabled=${this.busy} @click=${this.handleEndTurn}>
+                <button
+                  ?disabled=${this.busy ||
+                  phaseKey !== "MainTurn" ||
+                  !isYourTurn}
+                  @click=${this.handleEndTurn}
+                >
                   End Turn
                 </button>
               </div>
-            </article>
-
-            <article class="card stack">
-              <h3>Grant Resource</h3>
-              <label>
-                Player
-                <select
-                  .value=${String(this.grantPlayerId)}
-                  @change=${this.onGrantPlayerChange}
-                >
-                  ${players.length === 0
-                    ? html`<option value="1">1</option>`
-                    : players.map(
-                        (player) =>
-                          html`<option value=${String(player.id)}>
-                            ${player.id} - ${player.name}
-                          </option>`,
-                      )}
-                </select>
-              </label>
-              <label>
-                Resource
-                <select
-                  .value=${this.grantResource}
-                  @change=${this.onGrantResourceChange}
-                >
-                  ${RESOURCE_NAMES.map(
-                    (resource) =>
-                      html`<option value=${resource}>${resource}</option>`,
-                  )}
-                </select>
-              </label>
-              <label>
-                Amount
-                <input
-                  type="number"
-                  min="1"
-                  max="19"
-                  .value=${String(this.grantAmount)}
-                  @input=${this.onGrantAmountInput}
-                />
-              </label>
-              <button ?disabled=${this.busy} @click=${this.handleGrantResource}>
-                Grant
-              </button>
+              <p class="turn-note">
+                Active: ${this.playerNameFor(activePlayerId) ?? "-"} ·
+                ${isYourTurn ? "Your turn" : "Waiting"}
+              </p>
             </article>
 
             <article class="card stack">
               <h3>Buy Building</h3>
-              <label>
-                Player
-                <select
-                  .value=${String(this.purchasePlayerId)}
-                  @change=${this.onPurchasePlayerChange}
-                >
-                  ${players.length === 0
-                    ? html`<option value="1">1</option>`
-                    : players.map(
-                        (player) =>
-                          html`<option value=${String(player.id)}>
-                            ${player.id} - ${player.name}
-                          </option>`,
-                      )}
-                </select>
-              </label>
               <label>
                 Building
                 <select
@@ -283,7 +257,12 @@ export class GameApp extends LitElement {
                   )}
                 </select>
               </label>
-              <button ?disabled=${this.busy} @click=${this.handleBuyBuilding}>
+              <button
+                ?disabled=${this.busy ||
+                !isYourTurn ||
+                perspectivePlayer === null}
+                @click=${this.handleBuyBuilding}
+              >
                 Buy
               </button>
               <p class="cost-note">
@@ -326,6 +305,22 @@ export class GameApp extends LitElement {
             <p class=${this.statusError ? "status error" : "status ok"}>
               ${this.status}
             </p>
+            <h3>Your Hand</h3>
+            <div class="bank-row">
+              ${perspectivePlayer === null
+                ? html`<span>Pick a perspective player.</span>`
+                : RESOURCE_NAMES.map(
+                    (resource) => html`
+                      <span
+                        >${resource}:
+                        ${this.playerResourceAmount(
+                          perspectivePlayer,
+                          resource,
+                        )}</span
+                      >
+                    `,
+                  )}
+            </div>
             <h3>Bank</h3>
             <div class="bank-row">
               ${RESOURCE_NAMES.map(
@@ -361,6 +356,7 @@ export class GameApp extends LitElement {
 
   private renderPlayerCard(player: PlayerState, activePlayerId: number | null) {
     const isActive = activePlayerId === player.id;
+    const isPerspective = this.perspectivePlayerId === player.id;
     return html`
       <article class=${isActive ? "player-card active" : "player-card"}>
         <header>
@@ -373,15 +369,19 @@ export class GameApp extends LitElement {
           ${this.builtCount(player, "Settlement")}, cities
           ${this.builtCount(player, "City")})
         </p>
-        <div class="resource-row">
-          ${RESOURCE_NAMES.map(
-            (resource) =>
-              html`<span
-                >${resource.slice(0, 2).toUpperCase()}:
-                ${this.playerResourceAmount(player, resource)}</span
-              >`,
-          )}
-        </div>
+        ${isPerspective
+          ? html`
+              <div class="resource-row">
+                ${RESOURCE_NAMES.map(
+                  (resource) =>
+                    html`<span
+                      >${resource.slice(0, 2).toUpperCase()}:
+                      ${this.playerResourceAmount(player, resource)}</span
+                    >`,
+                )}
+              </div>
+            `
+          : html`<p class="hidden-hand">Hand hidden in this viewpoint.</p>`}
         <p class="pieces">
           Built: Roads ${this.builtCount(player, "Road")} · Settlements
           ${this.builtCount(player, "Settlement")} · Cities
@@ -432,7 +432,9 @@ export class GameApp extends LitElement {
     await this.runAction("Add player", async () => {
       const id = this.nextPlayerId();
       await this.sendCommandInternal({ AddPlayer: { id, name } });
-      this.grantPlayerId = id;
+      if (this.perspectivePlayerId === null) {
+        this.perspectivePlayerId = id;
+      }
       this.joinName = "";
     });
   }
@@ -443,8 +445,13 @@ export class GameApp extends LitElement {
     });
   }
 
-  private async handleAdvancePhase(): Promise<void> {
-    await this.runAction("Advance phase", async () => {
+  private async handleBeginTurnOrSetup(): Promise<void> {
+    const label =
+      this.phaseKey(this.state?.phase) === "TurnStart"
+        ? "Begin turn"
+        : "Advance setup";
+
+    await this.runAction(label, async () => {
       await this.sendCommandInternal("AdvancePhase");
     });
   }
@@ -455,23 +462,17 @@ export class GameApp extends LitElement {
     });
   }
 
-  private async handleGrantResource(): Promise<void> {
-    await this.runAction("Grant resource", async () => {
-      await this.sendCommandInternal({
-        GrantResource: {
-          player_id: this.grantPlayerId,
-          resource: this.grantResource,
-          amount: this.grantAmount,
-        },
-      });
-    });
-  }
-
   private async handleBuyBuilding(): Promise<void> {
+    if (this.perspectivePlayerId === null) {
+      this.status = "Select a perspective player before buying buildings.";
+      this.statusError = true;
+      return;
+    }
+
     await this.runAction("Buy building", async () => {
       await this.sendCommandInternal({
         BuyBuilding: {
-          player_id: this.purchasePlayerId,
+          player_id: this.perspectivePlayerId,
           building: this.purchaseBuilding,
         },
       });
@@ -525,9 +526,16 @@ export class GameApp extends LitElement {
 
   private updateFromState(state: GameState): void {
     this.state = state;
-    if (state.players.length > 0) {
-      this.grantPlayerId = state.players[0].id;
-      this.purchasePlayerId = state.players[0].id;
+    if (state.players.length === 0) {
+      this.perspectivePlayerId = null;
+      return;
+    }
+
+    if (
+      this.perspectivePlayerId === null ||
+      !state.players.some((player) => player.id === this.perspectivePlayerId)
+    ) {
+      this.perspectivePlayerId = state.players[0].id;
     }
   }
 
@@ -546,6 +554,16 @@ export class GameApp extends LitElement {
 
     const player = this.state.players.find((entry) => entry.id === playerId);
     return player?.name ?? null;
+  }
+
+  private getPerspectivePlayer(players: PlayerState[]): PlayerState | null {
+    if (this.perspectivePlayerId === null) {
+      return null;
+    }
+
+    return (
+      players.find((player) => player.id === this.perspectivePlayerId) ?? null
+    );
   }
 
   private nextPlayerId(): number {
@@ -608,6 +626,32 @@ export class GameApp extends LitElement {
           return `${name} (round ${round}, ${direction})`;
         }
         return name;
+      }
+    }
+
+    return "Unknown";
+  }
+
+  private phaseKey(
+    phase: unknown,
+  ): "Lobby" | "Setup" | "TurnStart" | "MainTurn" | "GameOver" | "Unknown" {
+    if (phase === "Lobby") {
+      return "Lobby";
+    }
+    if (phase === "TurnStart") {
+      return "TurnStart";
+    }
+    if (phase === "MainTurn") {
+      return "MainTurn";
+    }
+    if (phase === "GameOver") {
+      return "GameOver";
+    }
+
+    if (typeof phase === "object" && phase !== null) {
+      const entries = Object.entries(phase as Record<string, unknown>);
+      if (entries.length === 1 && entries[0][0] === "Setup") {
+        return "Setup";
       }
     }
 
@@ -715,22 +759,14 @@ export class GameApp extends LitElement {
     this.joinName = (event.target as HTMLInputElement).value;
   }
 
-  private onGrantPlayerChange(event: Event): void {
-    this.grantPlayerId = this.parsePositiveInt(
-      (event.target as HTMLSelectElement).value,
-      1,
-    );
-  }
-
-  private onGrantResourceChange(event: Event): void {
+  private onPerspectivePlayerChange(event: Event): void {
     const value = (event.target as HTMLSelectElement).value;
-    if (this.isResourceName(value)) {
-      this.grantResource = value;
+    if (value === "") {
+      this.perspectivePlayerId = null;
+      return;
     }
-  }
 
-  private onPurchasePlayerChange(event: Event): void {
-    this.purchasePlayerId = this.parsePositiveInt(
+    this.perspectivePlayerId = this.parsePositiveInt(
       (event.target as HTMLSelectElement).value,
       1,
     );
@@ -743,23 +779,12 @@ export class GameApp extends LitElement {
     }
   }
 
-  private onGrantAmountInput(event: Event): void {
-    this.grantAmount = this.parsePositiveInt(
-      (event.target as HTMLInputElement).value,
-      1,
-    );
-  }
-
   private parsePositiveInt(raw: string, fallback: number): number {
     const parsed = Number.parseInt(raw, 10);
     if (!Number.isFinite(parsed) || parsed <= 0) {
       return fallback;
     }
     return parsed;
-  }
-
-  private isResourceName(value: string): value is ResourceName {
-    return RESOURCE_NAMES.includes(value as ResourceName);
   }
 
   private isBuildingName(value: string): value is BuildingName {
@@ -976,6 +1001,13 @@ export class GameApp extends LitElement {
       gap: 0.45rem;
     }
 
+    .turn-note {
+      margin: 0;
+      font-size: 0.82rem;
+      color: #4f596f;
+      font-weight: 600;
+    }
+
     .players {
       display: grid;
       gap: 0.72rem;
@@ -1063,6 +1095,13 @@ export class GameApp extends LitElement {
       margin: 0;
       font-size: 0.84rem;
       color: #4a4f62;
+    }
+
+    .hidden-hand {
+      margin: 0;
+      font-size: 0.82rem;
+      color: #5f6577;
+      font-style: italic;
     }
 
     .foot-grid {

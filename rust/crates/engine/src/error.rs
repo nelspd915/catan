@@ -34,6 +34,12 @@ pub enum EngineError {
     /// The state has no active turn owner when one is required.
     #[error("no active player available")]
     NoActivePlayer,
+    /// A player action was attempted by a non-active player.
+    #[error("player {player_id} cannot act; active player is {active_player}")]
+    NotPlayersTurn {
+        player_id: PlayerId,
+        active_player: PlayerId,
+    },
     /// The player does not hold enough resource cards to pay a cost.
     #[error(
         "player {player_id} has insufficient {resource:?}: needs {required}, has {available}"

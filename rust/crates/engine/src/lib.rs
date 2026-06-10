@@ -200,8 +200,8 @@ mod tests {
         assert_eq!(player_after.roads_left, roads_before - 1);
         assert_eq!(player_after.roads_built, roads_built_before + 1);
         assert_eq!(player_after.victory_points, vp_before);
-        assert_eq!(player_after.resources.amount(Resource::Brick), 0);
-        assert_eq!(player_after.resources.amount(Resource::Lumber), 0);
+        assert_eq!(player_after.resources.amount(Resource::Brick), 1);
+        assert_eq!(player_after.resources.amount(Resource::Lumber), 1);
         assert_eq!(state.bank.amount(Resource::Brick), bank_brick_before + 1);
         assert_eq!(state.bank.amount(Resource::Lumber), bank_lumber_before + 1);
     }
@@ -282,9 +282,164 @@ mod tests {
                 player_id: PlayerId::new(1),
                 resource: Resource::Grain,
                 required: 2,
-                available: 0,
+                available: 1,
             }
         );
+    }
+
+    #[test]
+    fn advancing_to_main_turn_grants_simulation_income_to_all_players() {
+        let config = GameConfig {
+            min_players: 2,
+            ..GameConfig::default()
+        };
+        let mut state = Engine::new(config.clone()).create_game("income-sim");
+        let mut engine = Engine::new(config);
+
+        let _ = engine
+            .apply(
+                &mut state,
+                Command::AddPlayer {
+                    id: PlayerId::new(1),
+                    name: "Alice".to_string(),
+                },
+            )
+            .unwrap();
+        let _ = engine
+            .apply(
+                &mut state,
+                Command::AddPlayer {
+                    id: PlayerId::new(2),
+                    name: "Bob".to_string(),
+                },
+            )
+            .unwrap();
+
+        let _ = engine.apply(&mut state, Command::StartGame).unwrap();
+        let _ = engine.apply(&mut state, Command::AdvancePhase).unwrap();
+        let events = engine.apply(&mut state, Command::AdvancePhase).unwrap();
+
+        let grant_events = events
+            .iter()
+            .filter(|event| matches!(event, Event::ResourceGranted { .. }))
+            .count();
+        assert_eq!(grant_events, 10);
+
+        let alice = state.players.iter().find(|p| p.id == PlayerId::new(1)).unwrap();
+        let bob = state.players.iter().find(|p| p.id == PlayerId::new(2)).unwrap();
+
+        for resource in [
+            Resource::Brick,
+            Resource::Lumber,
+            Resource::Wool,
+            Resource::Grain,
+            Resource::Ore,
+        ] {
+            assert_eq!(alice.resources.amount(resource), 1);
+            assert_eq!(bob.resources.amount(resource), 1);
+            assert_eq!(state.bank.amount(resource), 17);
+        }
+    }
+
+    #[test]
+    fn buying_on_other_players_turn_is_rejected() {
+        let (mut engine, mut state) = create_started_main_turn_game();
+
+        let error = engine
+            .apply(
+                &mut state,
+                Command::BuyBuilding {
+                    player_id: PlayerId::new(2),
+                    building: Building::Road,
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            EngineError::NotPlayersTurn {
+                player_id: PlayerId::new(2),
+                active_player: PlayerId::new(1),
+            }
+        );
+    }
+
+    #[test]
+    fn buying_city_can_end_game_when_target_met() {
+        let config = GameConfig {
+            min_players: 2,
+            target_victory_points: 2,
+            ..GameConfig::default()
+        };
+        let mut state = Engine::new(config.clone()).create_game("victory");
+        let mut engine = Engine::new(config);
+
+        let _ = engine
+            .apply(
+                &mut state,
+                Command::AddPlayer {
+                    id: PlayerId::new(1),
+                    name: "Alice".to_string(),
+                },
+            )
+            .unwrap();
+        let _ = engine
+            .apply(
+                &mut state,
+                Command::AddPlayer {
+                    id: PlayerId::new(2),
+                    name: "Bob".to_string(),
+                },
+            )
+            .unwrap();
+        let _ = engine.apply(&mut state, Command::StartGame).unwrap();
+        let _ = engine.apply(&mut state, Command::AdvancePhase).unwrap();
+        let _ = engine.apply(&mut state, Command::AdvancePhase).unwrap();
+
+        let _ = engine
+            .apply(
+                &mut state,
+                Command::BuyBuilding {
+                    player_id: PlayerId::new(1),
+                    building: Building::Settlement,
+                },
+            )
+            .unwrap();
+
+        for (resource, amount) in [(Resource::Grain, 2), (Resource::Ore, 2)] {
+            let _ = engine
+                .apply(
+                    &mut state,
+                    Command::GrantResource {
+                        player_id: PlayerId::new(1),
+                        resource,
+                        amount,
+                    },
+                )
+                .unwrap();
+        }
+
+        let events = engine
+            .apply(
+                &mut state,
+                Command::BuyBuilding {
+                    player_id: PlayerId::new(1),
+                    building: Building::City,
+                },
+            )
+            .unwrap();
+
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                Event::GameWon {
+                    player_id,
+                    victory_points
+                } if *player_id == PlayerId::new(1) && *victory_points == 2
+            )
+        }));
+        assert_eq!(state.winner, Some(PlayerId::new(1)));
+        assert!(matches!(state.phase, GamePhase::GameOver));
     }
 
     #[test]

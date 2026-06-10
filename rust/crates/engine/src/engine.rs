@@ -11,6 +11,14 @@ use crate::model::{
     Building, Direction, GameConfig, GamePhase, GameState, Player, PlayerId, Resource,
 };
 
+const SIMULATION_INCOME_RESOURCES: [Resource; 5] = [
+    Resource::Brick,
+    Resource::Lumber,
+    Resource::Wool,
+    Resource::Grain,
+    Resource::Ore,
+];
+
 /// Stateful engine facade used by server-side game sessions.
 ///
 /// The engine owns static config and applies validated commands to mutable game
@@ -122,22 +130,33 @@ impl Engine {
 
     /// Move the game to its next coarse-grained phase.
     fn advance_phase(&self, state: &mut GameState) -> Result<Vec<Event>, EngineError> {
-        let next_phase = match state.phase {
+        match state.phase {
             // Setup currently jumps to turn start once setup handlers complete.
-            GamePhase::Setup { .. } => GamePhase::TurnStart,
-            // Turn-start transitions into main-turn actions.
-            GamePhase::TurnStart => GamePhase::MainTurn,
-            // Main turn remains stable until an explicit `EndTurn` command.
-            GamePhase::MainTurn => GamePhase::MainTurn,
-            GamePhase::Lobby | GamePhase::GameOver => {
-                return Err(EngineError::InvalidPhase {
-                    phase: state.phase.clone(),
-                });
+            GamePhase::Setup { .. } => {
+                state.phase = GamePhase::TurnStart;
+                Ok(vec![Event::PhaseAdvanced {
+                    phase: GamePhase::TurnStart,
+                }])
             }
-        };
+            // Turn-start transitions into main-turn actions and runs temporary
+            // deterministic income simulation in place of dice+board logic.
+            GamePhase::TurnStart => {
+                state.phase = GamePhase::MainTurn;
 
-        state.phase = next_phase.clone();
-        Ok(vec![Event::PhaseAdvanced { phase: next_phase }])
+                let mut events = vec![Event::PhaseAdvanced {
+                    phase: GamePhase::MainTurn,
+                }];
+                events.extend(self.simulate_round_income(state));
+                Ok(events)
+            }
+            // Main turn remains stable until an explicit `EndTurn` command.
+            GamePhase::MainTurn => Ok(vec![Event::PhaseAdvanced {
+                phase: GamePhase::MainTurn,
+            }]),
+            GamePhase::Lobby | GamePhase::GameOver => Err(EngineError::InvalidPhase {
+                phase: state.phase.clone(),
+            }),
+        }
     }
 
     /// End the active turn and rotate ownership to the next seat.
@@ -210,7 +229,17 @@ impl Engine {
             });
         }
 
+        let active_player = state.active_player().ok_or(EngineError::NoActivePlayer)?;
+        if active_player != player_id {
+            return Err(EngineError::NotPlayersTurn {
+                player_id,
+                active_player,
+            });
+        }
+
         let cost = Self::building_cost(building);
+        let target_victory_points = state.config.target_victory_points;
+        let player_victory_points;
 
         {
             let player = state
@@ -272,16 +301,28 @@ impl Engine {
             }
 
             Self::sync_victory_points_from_buildings(player);
+            player_victory_points = player.victory_points;
         }
 
         for (resource, amount) in &cost {
             state.bank.add(*resource, *amount);
         }
 
-        Ok(vec![Event::BuildingPurchased {
+        let mut events = vec![Event::BuildingPurchased {
             player_id,
             building,
-        }])
+        }];
+
+        if player_victory_points >= target_victory_points {
+            state.winner = Some(player_id);
+            state.phase = GamePhase::GameOver;
+            events.push(Event::GameWon {
+                player_id,
+                victory_points: player_victory_points,
+            });
+        }
+
+        Ok(events)
     }
 
     /// Return resource cost for one building purchase.
@@ -303,5 +344,33 @@ impl Engine {
         player.victory_points = player
             .settlements_built
             .saturating_add(player.cities_built.saturating_mul(2));
+    }
+
+    /// Temporary turn-income simulation while board production is not modeled.
+    ///
+    /// For each TurnStart -> MainTurn transition, every player receives one of
+    /// each resource card when available in the bank.
+    fn simulate_round_income(&self, state: &mut GameState) -> Vec<Event> {
+        let player_ids: Vec<PlayerId> = state.players.iter().map(|player| player.id).collect();
+        let mut events = Vec::new();
+
+        for player_id in player_ids {
+            for resource in SIMULATION_INCOME_RESOURCES {
+                if !state.bank.remove(resource, 1) {
+                    continue;
+                }
+
+                if let Some(player) = state.player_mut(player_id) {
+                    player.resources.add(resource, 1);
+                    events.push(Event::ResourceGranted {
+                        player_id,
+                        resource,
+                        amount: 1,
+                    });
+                }
+            }
+        }
+
+        events
     }
 }
