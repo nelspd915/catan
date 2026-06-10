@@ -1,14 +1,33 @@
 :root {
-  background:
-    radial-gradient(circle at 12% 8%, #d9f1e6 0%, transparent 34%),
-    radial-gradient(circle at 92% 3%, #dce9ff 0%, transparent 30%),
-    linear-gradient(180deg, #f4fbf7 0%, #ecf4ff 100%);
+  --page-bg:
+    radial-gradient(
+      circle at 10% 12%,
+      rgba(254, 222, 172, 0.65),
+      transparent 32%
+    ),
+    radial-gradient(
+      circle at 90% 4%,
+      rgba(194, 227, 255, 0.62),
+      transparent 28%
+    ),
+    radial-gradient(
+      circle at 80% 82%,
+      rgba(247, 213, 181, 0.44),
+      transparent 34%
+    ),
+    linear-gradient(185deg, #fff8ea 0%, #edf6ff 56%, #e8eef8 100%);
+  background: var(--page-bg);
+}
+
+* {
+  box-sizing: border-box;
 }
 
 body {
   margin: 0;
   min-width: 320px;
   min-height: 100svh;
+  font-family: "Avenir Next", "Trebuchet MS", sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
