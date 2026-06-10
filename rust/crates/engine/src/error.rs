@@ -50,4 +50,7 @@ pub enum EngineError {
         player_id: PlayerId,
         building: Building,
     },
+    /// City purchase requires a built settlement to upgrade.
+    #[error("player {player_id} has no settlement to upgrade into a city")]
+    NoSettlementToUpgrade { player_id: PlayerId },
 }

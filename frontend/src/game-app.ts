@@ -34,8 +34,11 @@ type PlayerState = {
   resources: ResourceBank;
   victory_points: number;
   roads_left: number;
+  roads_built?: number;
   settlements_left: number;
+  settlements_built?: number;
   cities_left: number;
+  cities_built?: number;
 };
 
 type GameState = {
@@ -365,6 +368,11 @@ export class GameApp extends LitElement {
           <p>P${player.id}</p>
         </header>
         <p class="vp">${player.victory_points} VP</p>
+        <p class="vp-subtle">
+          Built VP: ${this.builtVictoryPoints(player)} (settlements
+          ${this.builtCount(player, "Settlement")}, cities
+          ${this.builtCount(player, "City")})
+        </p>
         <div class="resource-row">
           ${RESOURCE_NAMES.map(
             (resource) =>
@@ -375,8 +383,13 @@ export class GameApp extends LitElement {
           )}
         </div>
         <p class="pieces">
-          Roads ${player.roads_left} · Settlements ${player.settlements_left} ·
-          Cities ${player.cities_left}
+          Built: Roads ${this.builtCount(player, "Road")} · Settlements
+          ${this.builtCount(player, "Settlement")} · Cities
+          ${this.builtCount(player, "City")}
+        </p>
+        <p class="pieces">
+          In Stock: Roads ${player.roads_left} · Settlements
+          ${player.settlements_left} · Cities ${player.cities_left}
         </p>
       </article>
     `;
@@ -552,6 +565,27 @@ export class GameApp extends LitElement {
 
   private bankAmount(resource: ResourceName): number {
     return this.state?.bank.resources?.[resource] ?? 0;
+  }
+
+  private builtCount(player: PlayerState, building: BuildingName): number {
+    if (building === "Road") {
+      return player.roads_built ?? Math.max(0, 15 - player.roads_left);
+    }
+
+    if (building === "Settlement") {
+      return (
+        player.settlements_built ?? Math.max(0, 5 - player.settlements_left)
+      );
+    }
+
+    return player.cities_built ?? Math.max(0, 4 - player.cities_left);
+  }
+
+  private builtVictoryPoints(player: PlayerState): number {
+    return (
+      this.builtCount(player, "Settlement") +
+      this.builtCount(player, "City") * 2
+    );
   }
 
   private formatPhase(phase: unknown): string {
@@ -1003,6 +1037,12 @@ export class GameApp extends LitElement {
       font-size: 1rem;
       font-weight: 700;
       color: #902f1c;
+    }
+
+    .vp-subtle {
+      margin: -0.2rem 0 0;
+      color: #5c6173;
+      font-size: 0.79rem;
     }
 
     .resource-row {

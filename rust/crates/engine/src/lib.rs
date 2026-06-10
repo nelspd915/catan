@@ -173,6 +173,8 @@ mod tests {
 
         let player_before = state.players.iter().find(|p| p.id == PlayerId::new(1)).unwrap();
         let roads_before = player_before.roads_left;
+        let roads_built_before = player_before.roads_built;
+        let vp_before = player_before.victory_points;
         let bank_brick_before = state.bank.amount(Resource::Brick);
         let bank_lumber_before = state.bank.amount(Resource::Lumber);
 
@@ -196,10 +198,68 @@ mod tests {
 
         let player_after = state.players.iter().find(|p| p.id == PlayerId::new(1)).unwrap();
         assert_eq!(player_after.roads_left, roads_before - 1);
+        assert_eq!(player_after.roads_built, roads_built_before + 1);
+        assert_eq!(player_after.victory_points, vp_before);
         assert_eq!(player_after.resources.amount(Resource::Brick), 0);
         assert_eq!(player_after.resources.amount(Resource::Lumber), 0);
         assert_eq!(state.bank.amount(Resource::Brick), bank_brick_before + 1);
         assert_eq!(state.bank.amount(Resource::Lumber), bank_lumber_before + 1);
+    }
+
+    #[test]
+    fn buying_settlement_and_city_updates_built_stock_and_victory_points() {
+        let (mut engine, mut state) = create_started_main_turn_game();
+
+        for (resource, amount) in [
+            (Resource::Brick, 1),
+            (Resource::Lumber, 1),
+            (Resource::Wool, 1),
+            (Resource::Grain, 3),
+            (Resource::Ore, 3),
+        ] {
+            let _ = engine
+                .apply(
+                    &mut state,
+                    Command::GrantResource {
+                        player_id: PlayerId::new(1),
+                        resource,
+                        amount,
+                    },
+                )
+                .unwrap();
+        }
+
+        let _ = engine
+            .apply(
+                &mut state,
+                Command::BuyBuilding {
+                    player_id: PlayerId::new(1),
+                    building: Building::Settlement,
+                },
+            )
+            .unwrap();
+
+        let after_settlement = state.players.iter().find(|p| p.id == PlayerId::new(1)).unwrap();
+        assert_eq!(after_settlement.settlements_built, 1);
+        assert_eq!(after_settlement.settlements_left, 4);
+        assert_eq!(after_settlement.victory_points, 1);
+
+        let _ = engine
+            .apply(
+                &mut state,
+                Command::BuyBuilding {
+                    player_id: PlayerId::new(1),
+                    building: Building::City,
+                },
+            )
+            .unwrap();
+
+        let after_city = state.players.iter().find(|p| p.id == PlayerId::new(1)).unwrap();
+        assert_eq!(after_city.settlements_built, 0);
+        assert_eq!(after_city.settlements_left, 5);
+        assert_eq!(after_city.cities_built, 1);
+        assert_eq!(after_city.cities_left, 3);
+        assert_eq!(after_city.victory_points, 2);
     }
 
     #[test]
@@ -223,6 +283,41 @@ mod tests {
                 resource: Resource::Grain,
                 required: 2,
                 available: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn buying_city_without_settlement_to_upgrade_is_rejected() {
+        let (mut engine, mut state) = create_started_main_turn_game();
+
+        for (resource, amount) in [(Resource::Grain, 2), (Resource::Ore, 3)] {
+            let _ = engine
+                .apply(
+                    &mut state,
+                    Command::GrantResource {
+                        player_id: PlayerId::new(1),
+                        resource,
+                        amount,
+                    },
+                )
+                .unwrap();
+        }
+
+        let error = engine
+            .apply(
+                &mut state,
+                Command::BuyBuilding {
+                    player_id: PlayerId::new(1),
+                    building: Building::City,
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            EngineError::NoSettlementToUpgrade {
+                player_id: PlayerId::new(1),
             }
         );
     }

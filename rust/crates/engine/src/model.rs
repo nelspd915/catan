@@ -175,10 +175,16 @@ pub struct Player {
     pub victory_points: u8,
     /// Number of road pieces still available to place.
     pub roads_left: u8,
+    /// Number of road pieces already built.
+    pub roads_built: u8,
     /// Number of settlement pieces still available to place.
     pub settlements_left: u8,
+    /// Number of settlement pieces currently built.
+    pub settlements_built: u8,
     /// Number of city pieces still available to place.
     pub cities_left: u8,
+    /// Number of city pieces currently built.
+    pub cities_built: u8,
 }
 
 impl Player {
@@ -190,8 +196,11 @@ impl Player {
             resources: ResourceBank::empty(),
             victory_points: 0,
             roads_left: 15,
+            roads_built: 0,
             settlements_left: 5,
+            settlements_built: 0,
             cities_left: 4,
+            cities_built: 0,
         }
     }
 }

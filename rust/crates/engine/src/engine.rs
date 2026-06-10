@@ -242,12 +242,36 @@ impl Engine {
                 });
             }
 
+            if matches!(building, Building::City) && player.settlements_built == 0 {
+                return Err(EngineError::NoSettlementToUpgrade { player_id });
+            }
+
             for (resource, amount) in &cost {
                 let removed = player.resources.remove(*resource, *amount);
                 debug_assert!(removed, "resource pre-check should guarantee removal");
             }
 
-            *pieces_left -= 1;
+            match building {
+                Building::Road => {
+                    *pieces_left -= 1;
+                    player.roads_built = player.roads_built.saturating_add(1);
+                }
+                Building::Settlement => {
+                    *pieces_left -= 1;
+                    player.settlements_built = player.settlements_built.saturating_add(1);
+                }
+                Building::City => {
+                    *pieces_left -= 1;
+                    player.cities_built = player.cities_built.saturating_add(1);
+
+                    // City upgrades consume one built settlement and return that
+                    // settlement piece to the player's stock.
+                    player.settlements_built -= 1;
+                    player.settlements_left = player.settlements_left.saturating_add(1);
+                }
+            }
+
+            Self::sync_victory_points_from_buildings(player);
         }
 
         for (resource, amount) in &cost {
@@ -272,5 +296,12 @@ impl Engine {
             ],
             Building::City => vec![(Resource::Grain, 2), (Resource::Ore, 3)],
         }
+    }
+
+    /// Recompute current victory points from built settlements and cities.
+    fn sync_victory_points_from_buildings(player: &mut Player) {
+        player.victory_points = player
+            .settlements_built
+            .saturating_add(player.cities_built.saturating_mul(2));
     }
 }
