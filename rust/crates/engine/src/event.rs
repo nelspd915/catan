@@ -50,4 +50,18 @@ pub enum Event {
         /// Knights played by owner at award time.
         army_size: u8,
     },
+    /// Longest road changed ownership.
+    LongestRoadAwarded {
+        /// New longest-road owner.
+        player_id: PlayerId,
+        /// Length used to satisfy longest-road ownership.
+        road_length: u8,
+        /// Previous owner, if ownership was transferred.
+        previous_owner: Option<PlayerId>,
+    },
+    /// Longest road bonus was removed because no owner currently qualifies.
+    LongestRoadCleared {
+        /// Previous owner that lost the bonus.
+        previous_owner: PlayerId,
+    },
 }

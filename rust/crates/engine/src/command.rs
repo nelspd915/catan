@@ -51,4 +51,14 @@ pub enum Command {
         /// The card type to play.
         card: DevelopmentCard,
     },
+    /// Update one player's computed continuous road length.
+    ///
+    /// This is a system-facing command intended to be called after board
+    /// topology changes (road placement or road interruption).
+    UpdateLongestRoadLength {
+        /// The player whose road length was recomputed.
+        player_id: PlayerId,
+        /// The player's best continuous road length.
+        road_length: u8,
+    },
 }

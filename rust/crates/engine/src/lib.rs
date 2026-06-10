@@ -297,4 +297,181 @@ mod tests {
         let player = state.players.iter().find(|player| player.id == PlayerId::new(1)).unwrap();
         assert_eq!(player.victory_points, 2);
     }
+
+    #[test]
+    fn longest_road_awards_two_victory_points() {
+        let config = GameConfig {
+            min_players: 2,
+            ..GameConfig::default()
+        };
+        let mut state = Engine::new(config.clone()).create_game("longest-road-award");
+        let mut engine = Engine::new(config);
+
+        let _ = engine
+            .apply(
+                &mut state,
+                Command::AddPlayer {
+                    id: PlayerId::new(1),
+                    name: "Alice".to_string(),
+                },
+            )
+            .unwrap();
+        let _ = engine
+            .apply(
+                &mut state,
+                Command::AddPlayer {
+                    id: PlayerId::new(2),
+                    name: "Bob".to_string(),
+                },
+            )
+            .unwrap();
+        let _ = engine.apply(&mut state, Command::StartGame).unwrap();
+        let _ = engine.apply(&mut state, Command::AdvancePhase).unwrap();
+        let _ = engine.apply(&mut state, Command::AdvancePhase).unwrap();
+
+        let events = engine
+            .apply(
+                &mut state,
+                Command::UpdateLongestRoadLength {
+                    player_id: PlayerId::new(1),
+                    road_length: 5,
+                },
+            )
+            .unwrap();
+
+        assert!(matches!(
+            events.first(),
+            Some(Event::LongestRoadAwarded {
+                player_id,
+                road_length: 5,
+                previous_owner: None,
+            }) if *player_id == PlayerId::new(1)
+        ));
+        assert_eq!(state.longest_road_owner, Some(PlayerId::new(1)));
+        assert_eq!(state.longest_road_size, 5);
+        let player = state.players.iter().find(|player| player.id == PlayerId::new(1)).unwrap();
+        assert_eq!(player.victory_points, 2);
+    }
+
+    #[test]
+    fn longest_road_tie_keeps_existing_owner() {
+        let config = GameConfig {
+            min_players: 2,
+            ..GameConfig::default()
+        };
+        let mut state = Engine::new(config.clone()).create_game("longest-road-tie");
+        let mut engine = Engine::new(config);
+
+        let _ = engine
+            .apply(
+                &mut state,
+                Command::AddPlayer {
+                    id: PlayerId::new(1),
+                    name: "Alice".to_string(),
+                },
+            )
+            .unwrap();
+        let _ = engine
+            .apply(
+                &mut state,
+                Command::AddPlayer {
+                    id: PlayerId::new(2),
+                    name: "Bob".to_string(),
+                },
+            )
+            .unwrap();
+        let _ = engine.apply(&mut state, Command::StartGame).unwrap();
+        let _ = engine.apply(&mut state, Command::AdvancePhase).unwrap();
+        let _ = engine.apply(&mut state, Command::AdvancePhase).unwrap();
+
+        let _ = engine
+            .apply(
+                &mut state,
+                Command::UpdateLongestRoadLength {
+                    player_id: PlayerId::new(1),
+                    road_length: 6,
+                },
+            )
+            .unwrap();
+        let events = engine
+            .apply(
+                &mut state,
+                Command::UpdateLongestRoadLength {
+                    player_id: PlayerId::new(2),
+                    road_length: 6,
+                },
+            )
+            .unwrap();
+
+        assert!(events.is_empty());
+        assert_eq!(state.longest_road_owner, Some(PlayerId::new(1)));
+        assert_eq!(state.longest_road_size, 6);
+
+        let alice = state.players.iter().find(|player| player.id == PlayerId::new(1)).unwrap();
+        let bob = state.players.iter().find(|player| player.id == PlayerId::new(2)).unwrap();
+        assert_eq!(alice.victory_points, 2);
+        assert_eq!(bob.victory_points, 0);
+    }
+
+    #[test]
+    fn longest_road_clears_when_no_player_meets_threshold() {
+        let config = GameConfig {
+            min_players: 2,
+            ..GameConfig::default()
+        };
+        let mut state = Engine::new(config.clone()).create_game("longest-road-clear");
+        let mut engine = Engine::new(config);
+
+        let _ = engine
+            .apply(
+                &mut state,
+                Command::AddPlayer {
+                    id: PlayerId::new(1),
+                    name: "Alice".to_string(),
+                },
+            )
+            .unwrap();
+        let _ = engine
+            .apply(
+                &mut state,
+                Command::AddPlayer {
+                    id: PlayerId::new(2),
+                    name: "Bob".to_string(),
+                },
+            )
+            .unwrap();
+        let _ = engine.apply(&mut state, Command::StartGame).unwrap();
+        let _ = engine.apply(&mut state, Command::AdvancePhase).unwrap();
+        let _ = engine.apply(&mut state, Command::AdvancePhase).unwrap();
+
+        let _ = engine
+            .apply(
+                &mut state,
+                Command::UpdateLongestRoadLength {
+                    player_id: PlayerId::new(1),
+                    road_length: 5,
+                },
+            )
+            .unwrap();
+        let events = engine
+            .apply(
+                &mut state,
+                Command::UpdateLongestRoadLength {
+                    player_id: PlayerId::new(1),
+                    road_length: 4,
+                },
+            )
+            .unwrap();
+
+        assert!(matches!(
+            events.first(),
+            Some(Event::LongestRoadCleared {
+                previous_owner,
+            }) if *previous_owner == PlayerId::new(1)
+        ));
+        assert_eq!(state.longest_road_owner, None);
+        assert_eq!(state.longest_road_size, 0);
+        let player = state.players.iter().find(|player| player.id == PlayerId::new(1)).unwrap();
+        assert_eq!(player.victory_points, 0);
+    }
 }

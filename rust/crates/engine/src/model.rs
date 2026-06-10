@@ -231,6 +231,8 @@ pub struct Player {
     pub newly_acquired_development_cards: Vec<DevelopmentCard>,
     /// Number of knight cards this player has played.
     pub played_knights: u8,
+    /// Longest currently-known continuous road length for this player.
+    pub longest_road_length: u8,
 }
 
 impl Player {
@@ -247,6 +249,7 @@ impl Player {
             development_cards: Vec::new(),
             newly_acquired_development_cards: Vec::new(),
             played_knights: 0,
+            longest_road_length: 0,
         }
     }
 
@@ -313,6 +316,10 @@ pub struct GameState {
     pub largest_army_owner: Option<PlayerId>,
     /// Number of knight cards played by largest-army owner.
     pub largest_army_size: u8,
+    /// Current holder of longest road bonus.
+    pub longest_road_owner: Option<PlayerId>,
+    /// Length value used for current longest-road ownership.
+    pub longest_road_size: u8,
     /// Monotonic state version for synchronization and replay bookkeeping.
     pub version: u64,
 }
@@ -332,6 +339,8 @@ impl GameState {
             development_deck: DevelopmentDeck::starting_base_game(),
             largest_army_owner: None,
             largest_army_size: 0,
+            longest_road_owner: None,
+            longest_road_size: 0,
             version: 0,
         }
     }

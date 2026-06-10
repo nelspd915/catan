@@ -54,6 +54,10 @@ impl Engine {
             Command::PlayDevelopmentCard { player_id, card } => {
                 self.play_development_card(state, player_id, card)?
             }
+            Command::UpdateLongestRoadLength {
+                player_id,
+                road_length,
+            } => self.update_longest_road_length(state, player_id, road_length)?,
         };
 
         // Monotonic versioning helps synchronization and deterministic replay.
@@ -371,5 +375,99 @@ impl Engine {
             player_id,
             army_size: played_knights,
         });
+    }
+
+    /// Store a player's computed road length and reconcile longest-road bonus.
+    fn update_longest_road_length(
+        &self,
+        state: &mut GameState,
+        player_id: PlayerId,
+        road_length: u8,
+    ) -> Result<Vec<Event>, EngineError> {
+        if matches!(state.phase, GamePhase::Lobby | GamePhase::GameOver) {
+            return Err(EngineError::InvalidPhase {
+                phase: state.phase.clone(),
+            });
+        }
+
+        let player_idx = state
+            .players
+            .iter()
+            .position(|player| player.id == player_id)
+            .ok_or(EngineError::PlayerNotFound { player_id })?;
+        state.players[player_idx].longest_road_length = road_length;
+
+        let mut events = Vec::new();
+        self.reconcile_longest_road(state, &mut events);
+        Ok(events)
+    }
+
+    /// Reconcile longest-road owner with base-game tie and threshold rules.
+    fn reconcile_longest_road(&self, state: &mut GameState, events: &mut Vec<Event>) {
+        let mut max_length = 0u8;
+        for player in &state.players {
+            max_length = max_length.max(player.longest_road_length);
+        }
+
+        let previous_owner = state.longest_road_owner;
+        let previous_size = state.longest_road_size;
+
+        let desired_owner = if max_length < 5 {
+            None
+        } else {
+            let contenders: Vec<PlayerId> = state
+                .players
+                .iter()
+                .filter(|player| player.longest_road_length == max_length)
+                .map(|player| player.id)
+                .collect();
+
+            if contenders.len() == 1 {
+                contenders.first().copied()
+            } else {
+                // On ties, existing owner keeps card if still tied for max.
+                previous_owner.filter(|owner| contenders.contains(owner))
+            }
+        };
+
+        let desired_size = if desired_owner.is_some() { max_length } else { 0 };
+
+        if previous_owner == desired_owner && previous_size == desired_size {
+            return;
+        }
+
+        if let Some(owner) = previous_owner {
+            if Some(owner) != desired_owner {
+                if let Some(owner_idx) = state.players.iter().position(|player| player.id == owner) {
+                    state.players[owner_idx].victory_points =
+                        state.players[owner_idx].victory_points.saturating_sub(2);
+                }
+            }
+        }
+
+        if let Some(owner) = desired_owner {
+            if Some(owner) != previous_owner {
+                if let Some(owner_idx) = state.players.iter().position(|player| player.id == owner) {
+                    state.players[owner_idx].victory_points =
+                        state.players[owner_idx].victory_points.saturating_add(2);
+                }
+            }
+
+            state.longest_road_owner = Some(owner);
+            state.longest_road_size = desired_size;
+            events.push(Event::LongestRoadAwarded {
+                player_id: owner,
+                road_length: desired_size,
+                previous_owner,
+            });
+        } else {
+            state.longest_road_owner = None;
+            state.longest_road_size = 0;
+            if let Some(owner) = previous_owner {
+                events.push(Event::LongestRoadCleared {
+                    previous_owner: owner,
+                });
+            }
+        }
     }
 }
