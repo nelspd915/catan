@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{PlayerId, Resource};
+use crate::model::{DevelopmentCard, PlayerId, Resource};
 
 /// A request to mutate game state.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -38,5 +38,17 @@ pub enum Command {
         resource: Resource,
         /// Number of cards to transfer from bank to player.
         amount: u8,
+    },
+    /// Buy one development card (cost: wool + grain + ore).
+    BuyDevelopmentCard {
+        /// The active player purchasing the card.
+        player_id: PlayerId,
+    },
+    /// Play one development card from the player's playable hand.
+    PlayDevelopmentCard {
+        /// The active player playing the card.
+        player_id: PlayerId,
+        /// The card type to play.
+        card: DevelopmentCard,
     },
 }

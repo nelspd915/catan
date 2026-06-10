@@ -27,7 +27,8 @@ pub use error::EngineError;
 pub use event::Event;
 /// Canonical domain model re-exports for crate consumers.
 pub use model::{
-    Direction, GameConfig, GameId, GamePhase, GameState, Player, PlayerId, Resource, ResourceBank,
+    DevelopmentCard, DevelopmentDeck, Direction, GameConfig, GameId, GamePhase, GameState, Player,
+    PlayerId, Resource, ResourceBank,
 };
 
 #[cfg(test)]
@@ -108,5 +109,192 @@ mod tests {
         assert_eq!(state.active_player(), Some(PlayerId::new(1)));
         let _ = engine.apply(&mut state, Command::EndTurn).unwrap();
         assert_eq!(state.active_player(), Some(PlayerId::new(2)));
+    }
+
+    #[test]
+    fn buying_development_card_spends_resources_and_locks_card_until_turn_end() {
+        let config = GameConfig {
+            min_players: 2,
+            ..GameConfig::default()
+        };
+        let mut state = Engine::new(config.clone()).create_game("dev-cards");
+        let mut engine = Engine::new(config);
+
+        let _ = engine
+            .apply(
+                &mut state,
+                Command::AddPlayer {
+                    id: PlayerId::new(1),
+                    name: "Alice".to_string(),
+                },
+            )
+            .unwrap();
+        let _ = engine
+            .apply(
+                &mut state,
+                Command::AddPlayer {
+                    id: PlayerId::new(2),
+                    name: "Bob".to_string(),
+                },
+            )
+            .unwrap();
+        let _ = engine.apply(&mut state, Command::StartGame).unwrap();
+        let _ = engine.apply(&mut state, Command::AdvancePhase).unwrap();
+        let _ = engine.apply(&mut state, Command::AdvancePhase).unwrap();
+
+        let _ = engine
+            .apply(
+                &mut state,
+                Command::GrantResource {
+                    player_id: PlayerId::new(1),
+                    resource: Resource::Wool,
+                    amount: 1,
+                },
+            )
+            .unwrap();
+        let _ = engine
+            .apply(
+                &mut state,
+                Command::GrantResource {
+                    player_id: PlayerId::new(1),
+                    resource: Resource::Grain,
+                    amount: 1,
+                },
+            )
+            .unwrap();
+        let _ = engine
+            .apply(
+                &mut state,
+                Command::GrantResource {
+                    player_id: PlayerId::new(1),
+                    resource: Resource::Ore,
+                    amount: 1,
+                },
+            )
+            .unwrap();
+
+        let events = engine
+            .apply(
+                &mut state,
+                Command::BuyDevelopmentCard {
+                    player_id: PlayerId::new(1),
+                },
+            )
+            .unwrap();
+
+        assert!(matches!(
+            events.first(),
+            Some(Event::DevelopmentCardPurchased {
+                player_id,
+                card: DevelopmentCard::Monopoly,
+                ..
+            }) if *player_id == PlayerId::new(1)
+        ));
+
+        let player = state.players.iter().find(|player| player.id == PlayerId::new(1)).unwrap();
+        assert_eq!(player.resources.amount(Resource::Wool), 0);
+        assert_eq!(player.resources.amount(Resource::Grain), 0);
+        assert_eq!(player.resources.amount(Resource::Ore), 0);
+        assert_eq!(player.newly_acquired_development_cards.len(), 1);
+
+        let play_result = engine.apply(
+            &mut state,
+            Command::PlayDevelopmentCard {
+                player_id: PlayerId::new(1),
+                card: DevelopmentCard::Monopoly,
+            },
+        );
+        assert!(matches!(
+            play_result,
+            Err(EngineError::DevelopmentCardUnavailable {
+                player_id,
+                card: DevelopmentCard::Monopoly,
+            }) if player_id == PlayerId::new(1)
+        ));
+
+        let _ = engine.apply(&mut state, Command::EndTurn).unwrap();
+        let player = state.players.iter().find(|player| player.id == PlayerId::new(1)).unwrap();
+        assert_eq!(player.newly_acquired_development_cards.len(), 0);
+        assert_eq!(player.development_cards.len(), 1);
+    }
+
+    #[test]
+    fn playing_knights_awards_largest_army() {
+        let config = GameConfig {
+            min_players: 2,
+            ..GameConfig::default()
+        };
+        let mut state = Engine::new(config.clone()).create_game("largest-army");
+        let mut engine = Engine::new(config);
+
+        let _ = engine
+            .apply(
+                &mut state,
+                Command::AddPlayer {
+                    id: PlayerId::new(1),
+                    name: "Alice".to_string(),
+                },
+            )
+            .unwrap();
+        let _ = engine
+            .apply(
+                &mut state,
+                Command::AddPlayer {
+                    id: PlayerId::new(2),
+                    name: "Bob".to_string(),
+                },
+            )
+            .unwrap();
+        let _ = engine.apply(&mut state, Command::StartGame).unwrap();
+        let _ = engine.apply(&mut state, Command::AdvancePhase).unwrap();
+        let _ = engine.apply(&mut state, Command::AdvancePhase).unwrap();
+
+        {
+            let player = state.players.iter_mut().find(|player| player.id == PlayerId::new(1)).unwrap();
+            player.development_cards.push(DevelopmentCard::Knight);
+            player.development_cards.push(DevelopmentCard::Knight);
+            player.development_cards.push(DevelopmentCard::Knight);
+        }
+
+        let _ = engine
+            .apply(
+                &mut state,
+                Command::PlayDevelopmentCard {
+                    player_id: PlayerId::new(1),
+                    card: DevelopmentCard::Knight,
+                },
+            )
+            .unwrap();
+        let _ = engine
+            .apply(
+                &mut state,
+                Command::PlayDevelopmentCard {
+                    player_id: PlayerId::new(1),
+                    card: DevelopmentCard::Knight,
+                },
+            )
+            .unwrap();
+        let events = engine
+            .apply(
+                &mut state,
+                Command::PlayDevelopmentCard {
+                    player_id: PlayerId::new(1),
+                    card: DevelopmentCard::Knight,
+                },
+            )
+            .unwrap();
+
+        assert!(matches!(
+            events.last(),
+            Some(Event::LargestArmyAwarded {
+                player_id,
+                army_size: 3,
+            }) if *player_id == PlayerId::new(1)
+        ));
+
+        assert_eq!(state.largest_army_owner, Some(PlayerId::new(1)));
+        assert_eq!(state.largest_army_size, 3);
+        let player = state.players.iter().find(|player| player.id == PlayerId::new(1)).unwrap();
+        assert_eq!(player.victory_points, 2);
     }
 }

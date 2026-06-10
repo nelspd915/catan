@@ -7,7 +7,9 @@
 use crate::command::Command;
 use crate::error::EngineError;
 use crate::event::Event;
-use crate::model::{Direction, GameConfig, GamePhase, GameState, Player, PlayerId};
+use crate::model::{
+    DevelopmentCard, Direction, GameConfig, GamePhase, GameState, Player, PlayerId, Resource,
+};
 
 /// Stateful engine facade used by server-side game sessions.
 ///
@@ -46,6 +48,12 @@ impl Engine {
                 resource,
                 amount,
             } => self.grant_resource(state, player_id, resource, amount)?,
+            Command::BuyDevelopmentCard { player_id } => {
+                self.buy_development_card(state, player_id)?
+            }
+            Command::PlayDevelopmentCard { player_id, card } => {
+                self.play_development_card(state, player_id, card)?
+            }
         };
 
         // Monotonic versioning helps synchronization and deterministic replay.
@@ -147,6 +155,12 @@ impl Engine {
             return Err(EngineError::NoActivePlayer);
         }
 
+        let ending_player = state.active_player().ok_or(EngineError::NoActivePlayer)?;
+        if let Some(player) = state.player_mut(ending_player) {
+            // Development cards bought this turn become playable on future turns.
+            player.unlock_new_development_cards();
+        }
+
         // Rotate in a deterministic ring over current turn order.
         state.active_index = (state.active_index + 1) % state.turn_order.len();
         state.phase = GamePhase::TurnStart;
@@ -189,5 +203,173 @@ impl Engine {
             resource,
             amount,
         }])
+    }
+
+    /// Purchase one development card by paying standard base-game cost.
+    fn buy_development_card(
+        &self,
+        state: &mut GameState,
+        player_id: PlayerId,
+    ) -> Result<Vec<Event>, EngineError> {
+        self.ensure_active_main_turn(state, player_id)?;
+
+        let player_idx = state
+            .players
+            .iter()
+            .position(|player| player.id == player_id)
+            .ok_or(EngineError::PlayerNotFound { player_id })?;
+
+        let player = &state.players[player_idx];
+        if !player.can_buy_development_card() {
+            for resource in [Resource::Wool, Resource::Grain, Resource::Ore] {
+                if player.resources.amount(resource) < 1 {
+                    return Err(EngineError::InsufficientResources {
+                        player_id,
+                        resource,
+                    });
+                }
+            }
+        }
+
+        let card = state
+            .development_deck
+            .draw()
+            .ok_or(EngineError::DevelopmentDeckEmpty)?;
+
+        {
+            let player = &mut state.players[player_idx];
+            let _ = player.resources.remove(Resource::Wool, 1);
+            let _ = player.resources.remove(Resource::Grain, 1);
+            let _ = player.resources.remove(Resource::Ore, 1);
+
+            match card {
+                // Victory point cards score immediately when purchased.
+                DevelopmentCard::VictoryPoint => {
+                    player.victory_points = player.victory_points.saturating_add(1);
+                    player.development_cards.push(card);
+                }
+                _ => {
+                    player.newly_acquired_development_cards.push(card);
+                }
+            }
+        }
+
+        state.bank.add(Resource::Wool, 1);
+        state.bank.add(Resource::Grain, 1);
+        state.bank.add(Resource::Ore, 1);
+
+        Ok(vec![Event::DevelopmentCardPurchased {
+            player_id,
+            card,
+            remaining_cards: state.development_deck.remaining(),
+        }])
+    }
+
+    /// Play one development card currently available in player's hand.
+    fn play_development_card(
+        &self,
+        state: &mut GameState,
+        player_id: PlayerId,
+        card: DevelopmentCard,
+    ) -> Result<Vec<Event>, EngineError> {
+        self.ensure_active_main_turn(state, player_id)?;
+
+        if card == DevelopmentCard::VictoryPoint {
+            return Err(EngineError::VictoryPointCardNotPlayable);
+        }
+
+        let player_idx = state
+            .players
+            .iter()
+            .position(|player| player.id == player_id)
+            .ok_or(EngineError::PlayerNotFound { player_id })?;
+
+        {
+            let player = &mut state.players[player_idx];
+            let hand_index = player
+                .development_cards
+                .iter()
+                .position(|existing| *existing == card)
+                .ok_or(EngineError::DevelopmentCardUnavailable { player_id, card })?;
+            let _ = player.development_cards.remove(hand_index);
+
+            if card == DevelopmentCard::Knight {
+                player.played_knights = player.played_knights.saturating_add(1);
+            }
+        }
+
+        let mut events = vec![Event::DevelopmentCardPlayed { player_id, card }];
+
+        if card == DevelopmentCard::Knight {
+            self.maybe_award_largest_army(state, player_id, &mut events);
+        }
+
+        Ok(events)
+    }
+
+    /// Ensure command is issued by active player during main-turn phase.
+    fn ensure_active_main_turn(
+        &self,
+        state: &GameState,
+        player_id: PlayerId,
+    ) -> Result<(), EngineError> {
+        if !matches!(state.phase, GamePhase::MainTurn) {
+            return Err(EngineError::InvalidPhase {
+                phase: state.phase.clone(),
+            });
+        }
+
+        let expected = state.active_player().ok_or(EngineError::NoActivePlayer)?;
+        if expected != player_id {
+            return Err(EngineError::NotPlayersTurn {
+                expected,
+                actual: player_id,
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Apply largest-army ownership rules after knight plays.
+    fn maybe_award_largest_army(
+        &self,
+        state: &mut GameState,
+        player_id: PlayerId,
+        events: &mut Vec<Event>,
+    ) {
+        let player_idx = match state.players.iter().position(|player| player.id == player_id) {
+            Some(index) => index,
+            None => return,
+        };
+
+        let played_knights = state.players[player_idx].played_knights;
+        if played_knights < 3 || played_knights <= state.largest_army_size {
+            return;
+        }
+
+        if let Some(previous_owner) = state.largest_army_owner {
+            if previous_owner != player_id {
+                if let Some(previous_idx) = state
+                    .players
+                    .iter()
+                    .position(|player| player.id == previous_owner)
+                {
+                    state.players[previous_idx].victory_points =
+                        state.players[previous_idx].victory_points.saturating_sub(2);
+                }
+                state.players[player_idx].victory_points =
+                    state.players[player_idx].victory_points.saturating_add(2);
+            }
+        } else {
+            state.players[player_idx].victory_points =
+                state.players[player_idx].victory_points.saturating_add(2);
+        }
+
+        state.largest_army_owner = Some(player_id);
+        state.largest_army_size = played_knights;
+        events.push(Event::LargestArmyAwarded {
+            player_id,
+            army_size: played_knights,
+        });
     }
 }

@@ -5,7 +5,7 @@
 
 use thiserror::Error;
 
-use crate::model::{GamePhase, PlayerId, Resource};
+use crate::model::{DevelopmentCard, GamePhase, PlayerId, Resource};
 
 /// Domain errors produced while validating or applying commands.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -34,4 +34,25 @@ pub enum EngineError {
     /// The state has no active turn owner when one is required.
     #[error("no active player available")]
     NoActivePlayer,
+    /// A command was issued by a non-active player.
+    #[error("it is player {expected}'s turn, not player {actual}")]
+    NotPlayersTurn { expected: PlayerId, actual: PlayerId },
+    /// Player does not have required resources for this action.
+    #[error("player {player_id} does not have enough {resource:?}")]
+    InsufficientResources {
+        player_id: PlayerId,
+        resource: Resource,
+    },
+    /// No development cards remain in the deck.
+    #[error("development deck is empty")]
+    DevelopmentDeckEmpty,
+    /// Attempted to play a development card not currently playable by player.
+    #[error("player {player_id} cannot play {card:?}")]
+    DevelopmentCardUnavailable {
+        player_id: PlayerId,
+        card: DevelopmentCard,
+    },
+    /// Victory point cards are not actively played as actions.
+    #[error("victory point cards cannot be actively played")]
+    VictoryPointCardNotPlayable,
 }

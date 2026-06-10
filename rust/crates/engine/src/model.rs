@@ -94,6 +94,63 @@ pub enum Resource {
     Ore,
 }
 
+/// Base-game development card variants.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum DevelopmentCard {
+    /// Knight card used for robber movement and largest-army race.
+    Knight,
+    /// Hidden victory-point card that immediately contributes to score.
+    VictoryPoint,
+    /// Road Building progress card.
+    RoadBuilding,
+    /// Year of Plenty progress card.
+    YearOfPlenty,
+    /// Monopoly progress card.
+    Monopoly,
+}
+
+/// Development card deck owned by the game.
+///
+/// The current implementation uses deterministic draw order to keep tests and
+/// replays stable. A shuffled seeded variant can be layered in later.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DevelopmentDeck {
+    cards: Vec<DevelopmentCard>,
+}
+
+impl DevelopmentDeck {
+    /// Build a standard base-game deck with 25 cards.
+    pub fn starting_base_game() -> Self {
+        let mut cards = Vec::with_capacity(25);
+        for _ in 0..14 {
+            cards.push(DevelopmentCard::Knight);
+        }
+        for _ in 0..5 {
+            cards.push(DevelopmentCard::VictoryPoint);
+        }
+        for _ in 0..2 {
+            cards.push(DevelopmentCard::RoadBuilding);
+        }
+        for _ in 0..2 {
+            cards.push(DevelopmentCard::YearOfPlenty);
+        }
+        for _ in 0..2 {
+            cards.push(DevelopmentCard::Monopoly);
+        }
+        Self { cards }
+    }
+
+    /// Draw one development card from the top of the deck.
+    pub fn draw(&mut self) -> Option<DevelopmentCard> {
+        self.cards.pop()
+    }
+
+    /// Number of cards still available in deck.
+    pub fn remaining(&self) -> usize {
+        self.cards.len()
+    }
+}
+
 /// Resource inventory keyed by resource type.
 ///
 /// Used for both player hands and the shared bank.
@@ -168,6 +225,12 @@ pub struct Player {
     pub settlements_left: u8,
     /// Number of city pieces still available to place.
     pub cities_left: u8,
+    /// Development cards that are currently playable.
+    pub development_cards: Vec<DevelopmentCard>,
+    /// Development cards purchased this turn and not yet playable.
+    pub newly_acquired_development_cards: Vec<DevelopmentCard>,
+    /// Number of knight cards this player has played.
+    pub played_knights: u8,
 }
 
 impl Player {
@@ -181,7 +244,23 @@ impl Player {
             roads_left: 15,
             settlements_left: 5,
             cities_left: 4,
+            development_cards: Vec::new(),
+            newly_acquired_development_cards: Vec::new(),
+            played_knights: 0,
         }
+    }
+
+    /// Check whether this player has enough resources for one card cost.
+    pub fn can_buy_development_card(&self) -> bool {
+        self.resources.amount(Resource::Wool) >= 1
+            && self.resources.amount(Resource::Grain) >= 1
+            && self.resources.amount(Resource::Ore) >= 1
+    }
+
+    /// Move non-playable cards purchased this turn into playable hand.
+    pub fn unlock_new_development_cards(&mut self) {
+        self.development_cards
+            .append(&mut self.newly_acquired_development_cards);
     }
 }
 
@@ -228,6 +307,12 @@ pub struct GameState {
     pub winner: Option<PlayerId>,
     /// Shared resource bank.
     pub bank: ResourceBank,
+    /// Development card deck.
+    pub development_deck: DevelopmentDeck,
+    /// Current holder of largest army bonus.
+    pub largest_army_owner: Option<PlayerId>,
+    /// Number of knight cards played by largest-army owner.
+    pub largest_army_size: u8,
     /// Monotonic state version for synchronization and replay bookkeeping.
     pub version: u64,
 }
@@ -244,6 +329,9 @@ impl GameState {
             active_index: 0,
             winner: None,
             bank: ResourceBank::starting(),
+            development_deck: DevelopmentDeck::starting_base_game(),
+            largest_army_owner: None,
+            largest_army_size: 0,
             version: 0,
         }
     }

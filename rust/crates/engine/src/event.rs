@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{GamePhase, PlayerId, Resource};
+use crate::model::{DevelopmentCard, GamePhase, PlayerId, Resource};
 
 /// A state-transition result emitted by the engine.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -26,5 +26,28 @@ pub enum Event {
         resource: Resource,
         /// Number of cards granted.
         amount: u8,
+    },
+    /// A development card was purchased by a player.
+    DevelopmentCardPurchased {
+        /// The purchasing player.
+        player_id: PlayerId,
+        /// The purchased card.
+        card: DevelopmentCard,
+        /// Number of cards left in development deck.
+        remaining_cards: usize,
+    },
+    /// A development card was played by a player.
+    DevelopmentCardPlayed {
+        /// The player who played the card.
+        player_id: PlayerId,
+        /// The card that was played.
+        card: DevelopmentCard,
+    },
+    /// Largest army changed ownership.
+    LargestArmyAwarded {
+        /// New largest-army owner.
+        player_id: PlayerId,
+        /// Knights played by owner at award time.
+        army_size: u8,
     },
 }
