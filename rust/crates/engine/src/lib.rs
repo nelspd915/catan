@@ -1,14 +1,32 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+pub struct GameState {
+    pub board: Board,
+    pub players: Vec<PlayerState>,
+    pub bank: ResourceCounts,
+    pub phase: Phase,
+    pub turn: TurnState,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub struct Board {
+    pub tiles: Vec<Tile>,
+    pub nodes: Vec<Node>,
+    pub edges: Vec<Edge>,
+    pub robber: TileId,
+}
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
+pub struct Tile {
+    pub terrain: Terrain,
+    pub number: Option<u8>,
+    pub nodes: [NodeId; 6],
+}
+
+pub struct Node {
+    pub adjacent_tiles: Vec<TileId>, // usually <= 3
+    pub edges: Vec<EdgeId>,          // usually <= 3
+    pub port: Option<Port>,
+    pub building: Option<Building>,
+}
+
+pub struct Edge {
+    pub nodes: [NodeId; 2],
+    pub road: Option<Road>,
 }
