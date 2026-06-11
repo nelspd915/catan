@@ -94,6 +94,17 @@ pub enum Resource {
     Ore,
 }
 
+/// Buildable piece categories purchasable by players.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Building {
+    /// Road piece purchase.
+    Road,
+    /// Settlement piece purchase.
+    Settlement,
+    /// City piece purchase.
+    City,
+}
+
 /// Resource inventory keyed by resource type.
 ///
 /// Used for both player hands and the shared bank.
@@ -164,10 +175,19 @@ pub struct Player {
     pub victory_points: u8,
     /// Number of road pieces still available to place.
     pub roads_left: u8,
+    /// Number of road pieces already built.
+    #[serde(default)]
+    pub roads_built: u8,
     /// Number of settlement pieces still available to place.
     pub settlements_left: u8,
+    /// Number of settlement pieces currently built.
+    #[serde(default)]
+    pub settlements_built: u8,
     /// Number of city pieces still available to place.
     pub cities_left: u8,
+    /// Number of city pieces currently built.
+    #[serde(default)]
+    pub cities_built: u8,
 }
 
 impl Player {
@@ -179,8 +199,11 @@ impl Player {
             resources: ResourceBank::empty(),
             victory_points: 0,
             roads_left: 15,
+            roads_built: 0,
             settlements_left: 5,
+            settlements_built: 0,
             cities_left: 4,
+            cities_built: 0,
         }
     }
 }

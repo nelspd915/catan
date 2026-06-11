@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{GamePhase, PlayerId, Resource};
+use crate::model::{Building, GamePhase, PlayerId, Resource};
 
 /// A state-transition result emitted by the engine.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -26,5 +26,19 @@ pub enum Event {
         resource: Resource,
         /// Number of cards granted.
         amount: u8,
+    },
+    /// A player successfully purchased a building piece.
+    BuildingPurchased {
+        /// The player who made the purchase.
+        player_id: PlayerId,
+        /// The building category purchased.
+        building: Building,
+    },
+    /// The game has ended with a winner.
+    GameWon {
+        /// Winning player id.
+        player_id: PlayerId,
+        /// Winner's final victory point total.
+        victory_points: u8,
     },
 }
