@@ -181,6 +181,7 @@ pub struct Player {
     /// Number of settlement pieces still available to place.
     pub settlements_left: u8,
     /// Number of settlement pieces currently built.
+    #[serde(default)]
     pub settlements_built: u8,
     /// Number of city pieces still available to place.
     pub cities_left: u8,
