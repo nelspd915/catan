@@ -139,7 +139,7 @@ export class GameApp extends LitElement {
           <div class="entry-actions">
             <button ?disabled=${this.busy} @click=${this.handleJoinRoom}>Join Room</button>
             <button ?disabled=${this.busy} @click=${this.handleHealthCheck}>Check Server</button>
-            <a class="admin-link" href="/admin.html" target="_blank" rel="noreferrer">
+            <a class="admin-link" href="/admin.html" target="_blank" rel="noopener noreferrer">
               Open Admin Page
             </a>
           </div>
