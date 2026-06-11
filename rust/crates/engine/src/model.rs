@@ -176,6 +176,7 @@ pub struct Player {
     /// Number of road pieces still available to place.
     pub roads_left: u8,
     /// Number of road pieces already built.
+    #[serde(default)]
     pub roads_built: u8,
     /// Number of settlement pieces still available to place.
     pub settlements_left: u8,
