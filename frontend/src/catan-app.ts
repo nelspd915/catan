@@ -7,7 +7,9 @@ const REGION_ORDER = [
   "right-ui-region",
   "self",
   "toast-region",
-  "status",
+  "cheats",
+  "pending-trades",
+  "turn-region",
   "players",
   "trading",
   "trade-main",
@@ -28,15 +30,21 @@ type ResizeHandle = "n" | "e" | "s" | "w";
 type ToastTone = "info" | "success" | "warning";
 type LogTone = "info" | "gain" | "build" | "trade";
 type ActionKind =
-  | "roll"
   | "end-turn"
   | "build-road"
   | "build-settlement"
   | "build-city"
-  | "buy-dev-card"
-  | "play-dev-card"
-  | "trade"
-  | "move-robber";
+  | "buy-dev-card";
+
+const RESOURCE_KINDS = ["Brick", "Lumber", "Ore", "Grain", "Wool"] as const;
+
+type ResourceKind = (typeof RESOURCE_KINDS)[number];
+type ResourceCounts = Partial<Record<ResourceKind, number>>;
+type TradeSide = "give" | "get";
+type TradeDragSource = "hand" | "want" | TradeSide;
+type TradeResponseState = "accepted" | "pending" | "declined";
+type PendingTradeKind = "offer" | "counter";
+type PlayerId = string;
 
 interface LayoutFrame {
   x: number;
@@ -62,6 +70,7 @@ interface LayoutMetrics {
   actionsWidth: number;
   toastWidth: number;
   toastHeight: number;
+  pendingTradesWidth: number;
 }
 
 interface RegionMeta {
@@ -86,6 +95,10 @@ interface StoredLayout {
 interface LayoutVisibility {
   tradeOpen: boolean;
   expandedLogOpen: boolean;
+  activePlayerCount: number;
+  cheatsCollapsed: boolean;
+  showActions: boolean;
+  showTradeShortcut: boolean;
 }
 
 interface DragState {
@@ -96,7 +109,7 @@ interface DragState {
 }
 
 interface MockPlayer {
-  id: string;
+  id: PlayerId;
   name: string;
   color: string;
   isYou: boolean;
@@ -109,7 +122,6 @@ interface MockPlayer {
   cities: number;
   army: number;
   longestRoad: number;
-  ports: string[];
 }
 
 interface MockAction {
@@ -119,10 +131,37 @@ interface MockAction {
   detail: string;
 }
 
-interface MockBankTrade {
-  resource: string;
-  cost: string;
-  enabled: boolean;
+interface TradeDragPayload {
+  source: TradeDragSource;
+  resource: ResourceKind;
+}
+
+interface MockTradeResponse {
+  playerId: PlayerId;
+  state: TradeResponseState;
+}
+
+interface PendingTradeRequest {
+  id: string;
+  label: string;
+  kind: PendingTradeKind;
+  senderId: PlayerId;
+  give: ResourceCounts;
+  get: ResourceCounts;
+  responses: MockTradeResponse[];
+}
+
+interface PendingTradeMatch {
+  trade: PendingTradeRequest;
+  isSender: boolean;
+  response?: MockTradeResponse;
+}
+
+interface TradeControl {
+  label: string;
+  primary?: boolean;
+  disabled?: boolean;
+  run: () => void;
 }
 
 interface MockLogEntry {
@@ -139,16 +178,26 @@ interface MockToast {
   detail: string;
 }
 
-interface StatusSnapshot {
-  activePlayer: string;
-  phase: string;
-  dice: [number, number];
-  prompt: string;
-  round: number;
+type PlayerHands = Record<PlayerId, ResourceCounts>;
+type PortKind = ResourceKind | "ThreeToOne";
+type PlayerPorts = Record<PlayerId, Partial<Record<PortKind, boolean>>>;
+
+interface BankPaymentOption {
+  resource: ResourceKind;
+  cost: number;
+  available: boolean;
 }
 
 const STORAGE_KEY = "catan-layout-sandbox-v6";
 const MIN_REGION_SIZE = 4;
+const MIN_PLAYER_COUNT = 2;
+const MAX_PLAYER_COUNT = 8;
+const MAX_PLAYER_COLUMNS = 4;
+const ACTIVE_PLAYER_ID: PlayerId = "p1";
+const MAX_VISIBLE_TOASTS = 5;
+const TOAST_LIFETIME_MS = 5000;
+const DICE_ROLL_INTERVAL_MS = 250;
+const CHEATS_COLLAPSED_HEIGHT = 5.5;
 
 const DEFAULT_METRICS: LayoutMetrics = {
   selfHeight: 22,
@@ -157,7 +206,7 @@ const DEFAULT_METRICS: LayoutMetrics = {
   panelInset: 2,
   panelGap: 1,
   bottomInset: 1.5,
-  statusHeight: 6,
+  statusHeight: 8,
   playersHeight: 13,
   rightToolsHeight: 5.5,
   logHeight: 67.5,
@@ -165,8 +214,9 @@ const DEFAULT_METRICS: LayoutMetrics = {
   bankTradesHeight: 8,
   tradeButtonWidth: 13,
   actionsWidth: 27,
-  toastWidth: 22,
+  toastWidth: 16,
   toastHeight: 25,
+  pendingTradesWidth: 24,
 };
 
 const DEFAULT_META: Record<RegionId, RegionMeta> = {
@@ -205,12 +255,26 @@ const DEFAULT_META: Record<RegionId, RegionMeta> = {
     kind: "container",
     zIndex: 55,
   },
-  status: {
-    id: "status",
-    name: "Status",
-    color: "#356b75",
+  cheats: {
+    id: "cheats",
+    name: "Cheats",
+    color: "#5a5d37",
     kind: "panel",
-    zIndex: 45,
+    zIndex: 54,
+  },
+  "pending-trades": {
+    id: "pending-trades",
+    name: "Pending Trades",
+    color: "#4e665c",
+    kind: "container",
+    zIndex: 48,
+  },
+  "turn-region": {
+    id: "turn-region",
+    name: "Turn",
+    color: "#356b75",
+    kind: "container",
+    zIndex: 56,
   },
   players: {
     id: "players",
@@ -298,7 +362,7 @@ const METRIC_LABELS: Record<LayoutMetricField, string> = {
   panelInset: "Panel inset",
   panelGap: "Panel gap",
   bottomInset: "Self item inset",
-  statusHeight: "Status height",
+  statusHeight: "Turn region height",
   playersHeight: "Players height",
   rightToolsHeight: "Right tools height",
   logHeight: "Log region height",
@@ -308,20 +372,26 @@ const METRIC_LABELS: Record<LayoutMetricField, string> = {
   actionsWidth: "Actions width",
   toastWidth: "Toast region width",
   toastHeight: "Toast region height",
+  pendingTradesWidth: "Pending trades width",
 };
 
-const MOCK_STATUS: StatusSnapshot = {
-  activePlayer: "Alice",
-  phase: "Main Turn",
-  dice: [3, 5],
-  prompt: "Build, trade, or end your turn.",
-  round: 7,
-};
+const MOCK_PLAYER_NAME_POOL = [
+  "Nick",
+  "Nels",
+  "Kobe",
+  "Rover",
+  "Jacob",
+  "Tango",
+  "Haley",
+  "Jiao",
+] as const;
+
+const MOCK_PLAYER_NAMES = shuffledPlayerNames();
 
 const MOCK_PLAYERS: MockPlayer[] = [
   {
     id: "p1",
-    name: "Alice",
+    name: MOCK_PLAYER_NAMES[0] ?? "Nick",
     color: "#d85745",
     isYou: true,
     isActive: true,
@@ -333,11 +403,10 @@ const MOCK_PLAYERS: MockPlayer[] = [
     cities: 1,
     army: 2,
     longestRoad: 4,
-    ports: ["3:1", "Ore"],
   },
   {
     id: "p2",
-    name: "Ben",
+    name: MOCK_PLAYER_NAMES[1] ?? "Nels",
     color: "#4f7fda",
     isYou: false,
     isActive: false,
@@ -349,11 +418,10 @@ const MOCK_PLAYERS: MockPlayer[] = [
     cities: 0,
     army: 1,
     longestRoad: 5,
-    ports: ["Brick"],
   },
   {
     id: "p3",
-    name: "Chloe",
+    name: MOCK_PLAYER_NAMES[2] ?? "Kobe",
     color: "#e2b245",
     isYou: false,
     isActive: false,
@@ -365,11 +433,10 @@ const MOCK_PLAYERS: MockPlayer[] = [
     cities: 2,
     army: 3,
     longestRoad: 3,
-    ports: ["Sheep"],
   },
   {
     id: "p4",
-    name: "Drew",
+    name: MOCK_PLAYER_NAMES[3] ?? "Rover",
     color: "#45a56f",
     isYou: false,
     isActive: false,
@@ -381,17 +448,70 @@ const MOCK_PLAYERS: MockPlayer[] = [
     cities: 0,
     army: 0,
     longestRoad: 2,
-    ports: ["3:1"],
+  },
+  {
+    id: "p5",
+    name: MOCK_PLAYER_NAMES[4] ?? "Jacob",
+    color: "#9d6bcb",
+    isYou: false,
+    isActive: false,
+    victoryPoints: 4,
+    resources: 5,
+    devCards: 1,
+    roads: 6,
+    settlements: 3,
+    cities: 1,
+    army: 1,
+    longestRoad: 4,
+  },
+  {
+    id: "p6",
+    name: MOCK_PLAYER_NAMES[5] ?? "Tango",
+    color: "#d1843f",
+    isYou: false,
+    isActive: false,
+    victoryPoints: 5,
+    resources: 8,
+    devCards: 0,
+    roads: 7,
+    settlements: 3,
+    cities: 1,
+    army: 2,
+    longestRoad: 6,
+  },
+  {
+    id: "p7",
+    name: MOCK_PLAYER_NAMES[6] ?? "Haley",
+    color: "#4db5b5",
+    isYou: false,
+    isActive: false,
+    victoryPoints: 3,
+    resources: 4,
+    devCards: 2,
+    roads: 5,
+    settlements: 4,
+    cities: 0,
+    army: 1,
+    longestRoad: 3,
+  },
+  {
+    id: "p8",
+    name: MOCK_PLAYER_NAMES[7] ?? "Jiao",
+    color: "#c95f94",
+    isYou: false,
+    isActive: false,
+    victoryPoints: 6,
+    resources: 7,
+    devCards: 1,
+    roads: 8,
+    settlements: 2,
+    cities: 2,
+    army: 3,
+    longestRoad: 5,
   },
 ];
 
-const MOCK_ACTIONS: MockAction[] = [
-  {
-    id: "roll",
-    label: "Roll",
-    enabled: false,
-    detail: "Done",
-  },
+const SHOP_ACTIONS: MockAction[] = [
   {
     id: "build-road",
     label: "Road",
@@ -416,39 +536,83 @@ const MOCK_ACTIONS: MockAction[] = [
     enabled: true,
     detail: "O W G",
   },
-  {
-    id: "play-dev-card",
-    label: "Play Dev",
-    enabled: false,
-    detail: "None",
-  },
-  {
-    id: "trade",
-    label: "Trade",
-    enabled: true,
-    detail: "Offer",
-  },
-  {
-    id: "move-robber",
-    label: "Robber",
-    enabled: false,
-    detail: "No 7",
-  },
-  {
-    id: "end-turn",
-    label: "End",
-    enabled: true,
-    detail: "Ben",
-  },
 ];
 
-const MOCK_BANK_TRADES: MockBankTrade[] = [
-  { resource: "Brick", cost: "4:1", enabled: true },
-  { resource: "Lumber", cost: "3:1", enabled: true },
-  { resource: "Ore", cost: "2:1", enabled: false },
-  { resource: "Grain", cost: "4:1", enabled: true },
-  { resource: "Wool", cost: "4:1", enabled: false },
-];
+const END_TURN_ACTION: MockAction = {
+  id: "end-turn",
+  label: "End Turn",
+  enabled: true,
+  detail: "Ben",
+};
+
+const DEFAULT_PLAYER_HANDS: PlayerHands = {
+  p1: {
+    Brick: 2,
+    Lumber: 2,
+    Ore: 1,
+    Grain: 2,
+    Wool: 2,
+  },
+  p2: {
+    Brick: 1,
+    Lumber: 3,
+    Grain: 2,
+    Wool: 1,
+  },
+  p3: {
+    Brick: 2,
+    Ore: 2,
+    Grain: 1,
+    Wool: 2,
+  },
+  p4: {
+    Lumber: 2,
+    Ore: 1,
+    Grain: 3,
+  },
+  p5: {
+    Brick: 1,
+    Lumber: 1,
+    Ore: 1,
+    Grain: 1,
+    Wool: 1,
+  },
+  p6: {
+    Brick: 3,
+    Lumber: 2,
+    Ore: 2,
+    Grain: 1,
+  },
+  p7: {
+    Brick: 1,
+    Lumber: 1,
+    Grain: 2,
+    Wool: 3,
+  },
+  p8: {
+    Lumber: 2,
+    Ore: 2,
+    Grain: 2,
+    Wool: 1,
+  },
+};
+
+const DEFAULT_PLAYER_PORTS: PlayerPorts = {};
+
+const TRADE_RESPONSE_LABELS: Record<TradeResponseState, string> = {
+  accepted: "Accepted",
+  pending: "Pending",
+  declined: "Declined",
+};
+
+const DIE_PIPS: Record<number, number[]> = {
+  1: [4],
+  2: [0, 8],
+  3: [0, 4, 8],
+  4: [0, 2, 6, 8],
+  5: [0, 2, 4, 6, 8],
+  6: [0, 2, 3, 5, 6, 8],
+};
 
 const MOCK_LOG: MockLogEntry[] = [
   {
@@ -479,7 +643,7 @@ const MOCK_LOG: MockLogEntry[] = [
     id: "l5",
     tone: "build",
     time: "12:14",
-    text: "Alice built a road toward the sheep port.",
+    text: "Alice built a road toward the sheep hex.",
   },
   {
     id: "l6",
@@ -501,24 +665,46 @@ const MOCK_LOG: MockLogEntry[] = [
   },
 ];
 
-const MOCK_TOASTS: MockToast[] = [
+const TOAST_MESSAGES: Omit<MockToast, "id">[] = [
   {
-    id: "t1",
     tone: "success",
     title: "Road placed",
     detail: "Select another action or end your turn.",
   },
   {
-    id: "t2",
     tone: "warning",
     title: "Longest road contested",
     detail: "Ben is one road away.",
   },
   {
-    id: "t3",
     tone: "info",
     title: "Trade reply",
     detail: "Chloe sent a counter offer.",
+  },
+  {
+    tone: "success",
+    title: "Trade accepted",
+    detail: "A player accepted the current offer.",
+  },
+  {
+    tone: "warning",
+    title: "Robber moved",
+    detail: "A resource may need to be discarded.",
+  },
+  {
+    tone: "info",
+    title: "Turn updated",
+    detail: "The next player is choosing an action.",
+  },
+  {
+    tone: "success",
+    title: "Resource gained",
+    detail: "A production result added cards.",
+  },
+  {
+    tone: "warning",
+    title: "Trade declined",
+    detail: "A player passed on the offer.",
   },
 ];
 
@@ -534,6 +720,9 @@ export class CatanApp extends LitElement {
   private settingsOpen = false;
 
   @state()
+  private cheatsCollapsed = true;
+
+  @state()
   private ctrlPressed = false;
 
   @state()
@@ -543,12 +732,59 @@ export class CatanApp extends LitElement {
   private selectedPlayerId = "p1";
 
   @state()
+  private activePlayerId: PlayerId = ACTIVE_PLAYER_ID;
+
+  @state()
+  private perspectivePlayerId: PlayerId = ACTIVE_PLAYER_ID;
+
+  @state()
+  private activePlayerCount = MIN_PLAYER_COUNT;
+
+  @state()
+  private diceValues: [number, number] = randomDicePair();
+
+  @state()
+  private diceRolled = false;
+
+  @state()
   private expandedLogOpen = false;
 
   @state()
-  private tradeOpen = true;
+  private tradeOpen = false;
+
+  @state()
+  private tradeGive: ResourceCounts = {};
+
+  @state()
+  private tradeGet: ResourceCounts = {};
+
+  @state()
+  private dragPayload: TradeDragPayload | null = null;
+
+  @state()
+  private pendingTradeRequests: PendingTradeRequest[] = [];
+
+  @state()
+  private selectedTradeRequestId: string | null = null;
+
+  @state()
+  private selectedBankTradeResource: ResourceKind | null = null;
+
+  @state()
+  private toasts: MockToast[] = [];
+
+  @state()
+  private playerHands: PlayerHands = clonePlayerHands(DEFAULT_PLAYER_HANDS);
+
+  @state()
+  private playerPorts: PlayerPorts = clonePlayerPorts(DEFAULT_PLAYER_PORTS);
 
   private dragState: DragState | null = null;
+  private tradeDropHandled = false;
+  private tradeSequence = 0;
+  private toastSequence = 0;
+  private toastTimers = new Map<string, number>();
+  private diceTimer: number | undefined;
 
   static styles = css`
     :host {
@@ -703,10 +939,70 @@ export class CatanApp extends LitElement {
       height: 100%;
       min-width: 0;
       min-height: 0;
-      grid-template-columns: 0.9fr 0.95fr 0.9fr 0.7fr 1.45fr;
-      gap: 6px;
-      padding: 7px;
+      grid-template-rows: auto minmax(0, 1fr);
+      gap: 4px;
+      align-items: center;
+      justify-items: end;
+      padding: 20px 8px 8px;
       overflow: hidden;
+    }
+
+    .turn-state-title {
+      max-width: 100%;
+      overflow: hidden;
+      color: rgba(255, 255, 255, 0.86);
+      font-size: 0.74rem;
+      font-weight: 950;
+      text-overflow: ellipsis;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .dice-roll-button {
+      display: flex;
+      width: 100%;
+      min-width: 0;
+      min-height: 0;
+      height: 100%;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 7px;
+      padding: 0;
+      overflow: hidden;
+      border: 0;
+      background: transparent;
+    }
+
+    .dice-roll-button.rolling .die {
+      border-color: rgba(255, 255, 255, 0.48);
+      box-shadow: 0 0 14px rgba(255, 255, 255, 0.18);
+    }
+
+    .die {
+      display: grid;
+      width: min(40px, 42%);
+      height: min(40px, 100%);
+      aspect-ratio: 1;
+      flex: 0 0 auto;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-rows: repeat(3, minmax(0, 1fr));
+      gap: 3px;
+      padding: 7px;
+      border: 1px solid rgba(255, 255, 255, 0.24);
+      border-radius: 7px;
+      background: #f3efe5;
+      box-shadow: 0 10px 20px rgba(0, 0, 0, 0.28);
+    }
+
+    .die-pip {
+      width: 100%;
+      height: 100%;
+      border-radius: 999px;
+      background: transparent;
+    }
+
+    .die-pip.visible {
+      background: #1b1d20;
     }
 
     .stat-cell,
@@ -770,7 +1066,7 @@ export class CatanApp extends LitElement {
       height: 100%;
       min-width: 0;
       min-height: 0;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(var(--player-columns), minmax(0, 1fr));
       grid-auto-rows: minmax(0, 1fr);
       gap: 6px;
       padding: 7px;
@@ -834,7 +1130,6 @@ export class CatanApp extends LitElement {
 
     .player-metrics,
     .player-pieces,
-    .player-ports,
     .trade-text,
     .action-detail {
       min-width: 0;
@@ -853,50 +1148,563 @@ export class CatanApp extends LitElement {
       height: 100%;
       min-width: 0;
       min-height: 0;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-rows:
+        minmax(54px, 0.72fr)
+        auto
+        minmax(0, 1.8fr)
+        minmax(34px, auto);
       gap: 8px;
       padding: 8px;
       overflow: hidden;
     }
 
-    .trade-block {
+    .trade-workspace.drop-ready {
+      outline: 2px solid rgba(255, 255, 255, 0.34);
+      outline-offset: -4px;
+    }
+
+    .trade-picker,
+    .trade-tray,
+    .trade-controls {
       display: grid;
       min-width: 0;
       min-height: 0;
-      grid-template-rows: auto auto 1fr;
-      gap: 7px;
-      padding: 8px;
       overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 8px;
+      background: rgba(0, 0, 0, 0.14);
     }
 
-    .trade-title {
+    .trade-picker {
+      grid-template-rows: auto minmax(0, 1fr);
+      gap: 5px;
+      padding: 6px;
+    }
+
+    .trade-section-title {
       overflow: hidden;
-      font-size: 0.68rem;
+      color: rgba(255, 255, 255, 0.72);
+      font-size: 0.62rem;
       font-weight: 900;
       text-overflow: ellipsis;
       text-transform: uppercase;
       white-space: nowrap;
     }
 
-    .resource-grid {
+    .trade-resource-row {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 5px;
       min-width: 0;
+      min-height: 0;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 4px;
+      overflow: hidden;
     }
 
-    .resource-pill {
+    .trade-builder-header {
+      display: flex;
       min-width: 0;
-      padding: 5px 6px;
+      min-height: 28px;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 0 2px;
       overflow: hidden;
-      color: rgba(255, 255, 255, 0.8);
+    }
+
+    .trade-builder-heading {
+      min-width: 0;
+      overflow: hidden;
+      color: rgba(255, 255, 255, 0.72);
       font-size: 0.62rem;
       font-weight: 900;
+      text-overflow: ellipsis;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .trade-clear-button {
+      flex: 0 0 auto;
+      min-width: 54px;
+      height: 24px;
+      padding: 0 8px;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.08);
+      font-size: 0.58rem;
+      font-weight: 900;
+      text-transform: uppercase;
+    }
+
+    .trade-clear-button:disabled {
+      color: rgba(255, 255, 255, 0.38);
+      background: rgba(0, 0, 0, 0.16);
+    }
+
+    .trade-workspace {
+      display: grid;
+      min-width: 0;
+      min-height: 0;
+      grid-template-rows: repeat(2, minmax(0, 1fr));
+      gap: 6px;
+      overflow: hidden;
+    }
+
+    .trade-tray {
+      grid-template-rows: auto minmax(0, 1fr);
+      gap: 6px;
+      padding: 6px;
+      border-style: dashed;
+    }
+
+    .trade-tray.drop-ready {
+      border-color: rgba(255, 255, 255, 0.42);
+      background: rgba(255, 255, 255, 0.07);
+    }
+
+    .trade-tray-header {
+      display: flex;
+      min-width: 0;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .trade-tray-count {
+      flex: 0 0 auto;
+      color: rgba(255, 255, 255, 0.56);
+      font-size: 0.58rem;
+      font-weight: 900;
+      text-transform: uppercase;
+    }
+
+    .trade-tray-content {
+      display: grid;
+      min-width: 0;
+      min-height: 0;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-auto-rows: minmax(42px, 1fr);
+      gap: 5px;
+      overflow: hidden;
+    }
+
+    .trade-empty {
+      display: grid;
+      min-width: 0;
+      min-height: 0;
+      grid-column: 1 / -1;
+      place-items: center;
+      padding: 8px;
+      border: 1px dashed rgba(255, 255, 255, 0.13);
+      border-radius: 7px;
+      color: rgba(255, 255, 255, 0.48);
+      font-size: 0.64rem;
+      font-weight: 800;
+      text-align: center;
+    }
+
+    .resource-card {
+      display: grid;
+      min-width: 0;
+      min-height: 0;
+      grid-template-rows: auto auto;
+      align-content: center;
+      gap: 2px;
+      padding: 5px 6px;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 7px;
+      background:
+        linear-gradient(
+          180deg,
+          color-mix(in srgb, var(--resource-color) 38%, #23262d) 0%,
+          color-mix(in srgb, var(--resource-color) 20%, #15171c) 100%
+        );
+      text-align: left;
+    }
+
+    .resource-card[draggable="true"] {
+      cursor: grab;
+    }
+
+    .resource-card[draggable="true"]:active {
+      cursor: grabbing;
+    }
+
+    .resource-card.disabled,
+    .resource-card:disabled {
+      cursor: not-allowed;
+      opacity: 0.42;
+    }
+
+    .resource-card-name,
+    .resource-card-count {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .resource-card-name {
+      font-size: 0.66rem;
+      font-weight: 900;
+    }
+
+    .resource-card-count {
+      color: rgba(255, 255, 255, 0.68);
+      font-size: 0.58rem;
+      font-weight: 850;
+    }
+
+    .trade-controls {
+      display: grid;
+      grid-template-columns: minmax(0, auto) minmax(0, 1fr);
+      gap: 7px;
+      align-items: center;
+      padding: 7px;
+    }
+
+    .trade-control-actions {
+      display: flex;
+      min-width: 0;
+      height: 100%;
+      gap: 7px;
+      overflow: hidden;
+    }
+
+    .trade-control-button {
+      min-width: 0;
+      height: 100%;
+      min-height: 28px;
+      padding: 0 8px;
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      border-radius: 7px;
+      background: rgba(255, 255, 255, 0.08);
+      font-size: 0.62rem;
+      font-weight: 900;
+      text-overflow: ellipsis;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .trade-control-button.primary {
+      background: rgba(255, 255, 255, 0.15);
+    }
+
+    .trade-control-button:disabled {
+      color: rgba(255, 255, 255, 0.38);
+      background: rgba(0, 0, 0, 0.16);
+    }
+
+    .trade-status {
+      min-width: 0;
+      overflow: hidden;
+      color: rgba(255, 255, 255, 0.64);
+      font-size: 0.62rem;
+      font-weight: 800;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .pending-trades-shell {
+      display: grid;
+      width: 100%;
+      height: 100%;
+      min-width: 0;
+      min-height: 0;
+      padding: 32px 8px 8px;
+      overflow: hidden;
+    }
+
+    .pending-trade-list {
+      display: grid;
+      width: 100%;
+      height: 100%;
+      min-width: 0;
+      min-height: 0;
+      align-content: start;
+      justify-items: start;
+      gap: 8px;
+      overflow: auto;
+      scrollbar-width: thin;
+    }
+
+    .pending-trade-row {
+      --pending-trade-size: 94px;
+      --pending-player-gap: 6px;
+      --pending-player-size: 44px;
+      --pending-context-height: 22px;
+      display: inline-grid;
+      width: fit-content;
+      max-width: none;
+      grid-template-rows: max-content auto;
+      gap: 8px;
+      padding: 7px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 8px;
+      background: rgba(0, 0, 0, 0.22);
+      cursor: pointer;
+    }
+
+    .pending-trade-row:hover,
+    .pending-trade-row.selected {
+      border-color: rgba(255, 255, 255, 0.32);
+      background: rgba(255, 255, 255, 0.07);
+    }
+
+    .pending-trade-body {
+      display: grid;
+      min-width: 0;
+      grid-template-columns: var(--pending-trade-size) max-content;
+      gap: 8px;
+    }
+
+    .pending-trade-row .trade-preview-block {
+      width: var(--pending-trade-size);
+      height: var(--pending-trade-size);
+      align-self: start;
+    }
+
+    .pending-trade-players {
+      display: grid;
+      width: max-content;
+      align-content: start;
+      overflow: hidden;
+    }
+
+    .pending-trade-player-list {
+      display: grid;
+      width: max-content;
+      grid-auto-columns: var(--pending-player-size);
+      grid-auto-flow: column;
+      grid-template-rows: repeat(2, var(--pending-player-size));
+      gap: var(--pending-player-gap);
+      overflow: hidden;
+    }
+
+    .pending-trade-context-actions {
+      display: grid;
+      width: max-content;
+      min-width: 0;
+      grid-template-columns: repeat(var(--pending-action-columns), var(--pending-player-size));
+      grid-auto-rows: var(--pending-context-height);
+      gap: var(--pending-player-gap);
+      overflow: hidden;
+    }
+
+    .pending-trade-context-button {
+      min-width: 0;
+      min-height: 0;
+      padding: 0 4px;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.08);
+      font-size: 0.48rem;
+      font-weight: 900;
+      text-overflow: ellipsis;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .pending-trade-context-button.primary {
+      background: rgba(255, 255, 255, 0.15);
+    }
+
+    .pending-trade-context-button:disabled {
+      color: rgba(255, 255, 255, 0.36);
+      background: rgba(0, 0, 0, 0.18);
+    }
+
+    .pending-trade-kind-marker {
+      display: grid;
+      width: var(--pending-trade-size);
+      height: var(--pending-context-height);
+      place-items: center;
+      padding: 0 6px;
+      overflow: hidden;
+      border: 1px solid rgba(117, 167, 255, 0.3);
+      border-radius: 6px;
+      background: rgba(117, 167, 255, 0.1);
+      color: rgba(255, 255, 255, 0.78);
+      font-size: 0.48rem;
+      font-weight: 900;
+      text-overflow: ellipsis;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .trade-preview-block {
+      position: relative;
+      display: grid;
+      min-width: 0;
+      min-height: 0;
+      grid-template-rows: repeat(2, minmax(0, 1fr));
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 7px;
+      background: rgba(0, 0, 0, 0.18);
+    }
+
+    .trade-preview-block.compact {
+      border-radius: 6px;
+    }
+
+    .trade-preview-half {
+      display: flex;
+      min-width: 0;
+      min-height: 0;
+      flex-wrap: wrap;
+      align-content: center;
+      gap: 3px;
+      padding: 4px;
+      overflow: hidden;
+    }
+
+    .trade-preview-get {
+      background:
+        radial-gradient(circle at 50% 50%, rgba(89, 216, 137, 0.22), transparent 68%),
+        rgba(50, 132, 85, 0.16);
+      box-shadow: inset 0 0 14px rgba(89, 216, 137, 0.14);
+    }
+
+    .trade-preview-give {
+      background:
+        radial-gradient(circle at 50% 50%, rgba(232, 92, 76, 0.2), transparent 68%),
+        rgba(150, 56, 49, 0.16);
+      box-shadow: inset 0 0 14px rgba(232, 92, 76, 0.14);
+    }
+
+    .trade-preview-divider {
+      position: absolute;
+      top: 50%;
+      left: 11%;
+      right: 11%;
+      height: 1px;
+      transform: translateY(-50%);
+      background: rgba(255, 255, 255, 0.34);
+    }
+
+    .trade-preview-resource {
+      display: inline-grid;
+      min-width: 0;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 3px;
+      align-items: center;
+      max-width: 100%;
+      padding: 2px 4px;
+      overflow: hidden;
+      border: 1px solid color-mix(in srgb, var(--resource-color) 58%, transparent);
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--resource-color) 24%, rgba(0, 0, 0, 0.34));
+      font-size: 0.5rem;
+      font-weight: 900;
+    }
+
+    .trade-preview-block.compact .trade-preview-resource {
+      gap: 2px;
+      padding: 1px 3px;
+      font-size: 0.46rem;
+    }
+
+    .trade-preview-resource-name,
+    .trade-preview-resource-count,
+    .trade-preview-empty {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .trade-preview-resource-count {
+      color: rgba(255, 255, 255, 0.66);
+    }
+
+    .trade-preview-empty {
+      width: 100%;
+      color: rgba(255, 255, 255, 0.38);
+      font-size: 0.5rem;
+      font-weight: 800;
+      text-align: center;
+      text-transform: uppercase;
+    }
+
+    .player-token.state-accepted {
+      --response-color: #59d889;
+    }
+
+    .player-token.state-pending {
+      --response-color: #d6bd67;
+    }
+
+    .player-token.state-declined {
+      --response-color: #e85c4c;
+    }
+
+    .player-token {
+      display: inline-grid;
+      min-width: 0;
+      grid-template-columns: 6px minmax(0, 1fr);
+      align-items: center;
+      gap: 4px;
+      max-width: 100%;
+      padding: 2px 5px;
+      overflow: hidden;
+      border: 1px solid color-mix(in srgb, var(--response-color) 52%, transparent);
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--response-color) 14%, rgba(0, 0, 0, 0.22));
+      font-size: 0.54rem;
+      font-weight: 900;
+      text-align: left;
+    }
+
+    .player-token.compact {
+      grid-template-columns: 5px minmax(0, 1fr);
+      gap: 3px;
+      padding: 1px 3px;
+      font-size: 0.46rem;
+    }
+
+    .pending-trade-player-list .player-token {
+      display: grid;
+      width: 100%;
+      height: 100%;
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: 8px minmax(0, 1fr);
+      gap: 4px;
+      justify-items: stretch;
+      align-items: center;
+      padding: 5px;
+      border-radius: 7px;
+      font-size: 0.56rem;
+      text-align: center;
+    }
+
+    .pending-trade-player-list .player-token.compact {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .player-token-dot {
+      width: 100%;
+      aspect-ratio: 1;
+      border-radius: 999px;
+      background: var(--player-color);
+      box-shadow: 0 0 8px color-mix(in srgb, var(--player-color) 68%, transparent);
+    }
+
+    .pending-trade-player-list .player-token-dot {
+      height: 100%;
+      aspect-ratio: auto;
+    }
+
+    .player-token-name {
+      min-width: 0;
+      overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
 
     .bank-trades-shell {
+      position: relative;
       display: grid;
       width: 100%;
       height: 100%;
@@ -912,44 +1720,173 @@ export class CatanApp extends LitElement {
       display: grid;
       min-width: 0;
       min-height: 0;
-      grid-template-columns: minmax(0, 1fr) auto;
-      grid-template-rows: auto auto;
-      gap: 2px 5px;
-      align-content: center;
-      padding: 6px;
+      grid-template-rows: auto minmax(0, 1fr);
+      gap: 4px;
+      padding: 6px 5px;
       overflow: hidden;
       text-align: left;
     }
 
-    .bank-trade-button:disabled {
+    .bank-trade-button.unavailable {
       color: rgba(255, 255, 255, 0.42);
       background: rgba(0, 0, 0, 0.14);
     }
 
+    .bank-trade-button.selected {
+      border-color: rgba(255, 255, 255, 0.38);
+      background: rgba(255, 255, 255, 0.13);
+    }
+
+    .bank-trade-header {
+      display: grid;
+      min-width: 0;
+      grid-template-columns: 10px minmax(0, 1fr);
+      gap: 5px;
+      align-items: center;
+    }
+
     .resource-mark {
-      grid-row: 1 / 3;
       width: 10px;
+      height: 10px;
       border-radius: 999px;
       background: var(--resource-color);
     }
 
-    .bank-resource,
-    .bank-cost {
+    .bank-resource {
       min-width: 0;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-    }
-
-    .bank-resource {
       font-size: 0.66rem;
       font-weight: 900;
     }
 
-    .bank-cost {
+    .bank-cost-grid {
+      display: grid;
+      min-width: 0;
+      min-height: 0;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 3px;
+      overflow: hidden;
+    }
+
+    .bank-cost-column {
+      display: grid;
+      min-width: 0;
+      min-height: 0;
+      grid-template-rows: repeat(4, minmax(0, 1fr)) auto;
+      justify-items: center;
+      gap: 2px;
+      overflow: hidden;
+    }
+
+    .bank-cost-column.unavailable {
+      opacity: 0.38;
+    }
+
+    .bank-cost-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      background: transparent;
+    }
+
+    .bank-cost-dot.filled {
+      background: var(--payment-color);
+      box-shadow: 0 0 6px color-mix(in srgb, var(--payment-color) 58%, transparent);
+    }
+
+    .bank-cost-number {
+      min-width: 0;
+      overflow: hidden;
       color: rgba(255, 255, 255, 0.64);
-      font-size: 0.58rem;
-      font-weight: 800;
+      font-size: 0.48rem;
+      font-weight: 900;
+      line-height: 1;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .bank-payment-popover {
+      position: absolute;
+      left: 7px;
+      right: 7px;
+      bottom: 7px;
+      z-index: 8;
+      display: grid;
+      min-width: 0;
+      gap: 6px;
+      padding: 7px;
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      border-radius: 8px;
+      background: rgba(17, 19, 23, 0.96);
+      box-shadow: 0 16px 34px rgba(0, 0, 0, 0.42);
+    }
+
+    .bank-payment-header {
+      display: flex;
+      min-width: 0;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .bank-payment-title {
+      min-width: 0;
+      overflow: hidden;
+      font-size: 0.62rem;
+      font-weight: 900;
+      text-overflow: ellipsis;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .bank-payment-close {
+      display: grid;
+      width: 22px;
+      height: 22px;
+      place-items: center;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.08);
+      font-size: 0.7rem;
+      font-weight: 900;
+    }
+
+    .bank-payment-options {
+      display: grid;
+      min-width: 0;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 5px;
+    }
+
+    .bank-payment-option {
+      display: grid;
+      min-width: 0;
+      min-height: 34px;
+      grid-template-columns: 8px minmax(0, 1fr);
+      gap: 4px;
+      align-items: center;
+      padding: 5px;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 7px;
+      background: rgba(255, 255, 255, 0.08);
+      text-align: left;
+    }
+
+    .bank-payment-option:disabled {
+      color: rgba(255, 255, 255, 0.38);
+      background: rgba(0, 0, 0, 0.18);
+    }
+
+    .bank-payment-text {
+      min-width: 0;
+      overflow: hidden;
+      font-size: 0.52rem;
+      font-weight: 900;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .tools-shell {
@@ -979,6 +1916,152 @@ export class CatanApp extends LitElement {
 
     .tool-button:hover {
       background: rgba(255, 255, 255, 0.14);
+    }
+
+    .cheats-shell {
+      display: grid;
+      width: 100%;
+      height: 100%;
+      min-width: 0;
+      min-height: 0;
+      grid-template-rows: auto auto auto minmax(0, 1fr);
+      gap: 5px;
+      padding: 6px;
+      overflow: hidden;
+    }
+
+    .cheats-shell.collapsed {
+      height: auto;
+      min-height: 0;
+      grid-template-rows: auto;
+      align-content: start;
+    }
+
+    .cheat-header-button {
+      display: flex;
+      width: 100%;
+      min-width: 0;
+      min-height: 28px;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 5px 7px;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 7px;
+      background: rgba(255, 255, 255, 0.1);
+      font-size: 0.6rem;
+      font-weight: 950;
+      text-transform: uppercase;
+    }
+
+    .cheat-header-title,
+    .cheat-header-state {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .cheat-header-state {
+      flex: 0 0 auto;
+      color: rgba(255, 255, 255, 0.62);
+      font-size: 0.5rem;
+    }
+
+    .cheat-top-row {
+      display: grid;
+      min-width: 0;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px;
+    }
+
+    .cheat-button {
+      display: grid;
+      min-width: 0;
+      min-height: 22px;
+      place-items: center;
+      padding: 4px 5px;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 7px;
+      background: rgba(255, 255, 255, 0.08);
+      font-size: 0.54rem;
+      font-weight: 900;
+      text-overflow: ellipsis;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .cheat-button.active {
+      border-color: rgba(255, 255, 255, 0.36);
+      background: rgba(255, 255, 255, 0.17);
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+    }
+
+    .cheat-port-grid {
+      display: grid;
+      min-width: 0;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 5px;
+      overflow: hidden;
+    }
+
+    .cheat-port-grid .cheat-button {
+      min-height: 22px;
+      padding: 3px 4px;
+      font-size: 0.48rem;
+    }
+
+    .cheat-resource-grid {
+      align-self: end;
+      display: grid;
+      min-width: 0;
+      min-height: 0;
+      gap: 5px;
+      overflow: hidden;
+    }
+
+    .cheat-resource-row {
+      display: grid;
+      min-width: 0;
+      grid-template-columns: minmax(0, 1fr) 24px 24px;
+      gap: 4px;
+      align-items: stretch;
+    }
+
+    .cheat-resource-label {
+      display: grid;
+      min-width: 0;
+      grid-template-columns: 9px minmax(0, 1fr) auto;
+      gap: 5px;
+      align-items: center;
+      padding: 4px 5px;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 7px;
+      background: rgba(0, 0, 0, 0.16);
+      font-size: 0.52rem;
+      font-weight: 900;
+    }
+
+    .cheat-resource-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 999px;
+      background: var(--resource-color);
+    }
+
+    .cheat-resource-name,
+    .cheat-resource-count {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .cheat-resource-count {
+      color: rgba(255, 255, 255, 0.62);
     }
 
     .minimal-log-shell,
@@ -1092,6 +2175,7 @@ export class CatanApp extends LitElement {
       min-width: 0;
       min-height: 0;
       align-content: start;
+      grid-auto-rows: calc((100% - 32px) / 5);
       gap: 8px;
       padding: 8px;
       overflow: hidden;
@@ -1100,8 +2184,10 @@ export class CatanApp extends LitElement {
     .toast {
       display: grid;
       min-width: 0;
+      min-height: 0;
       gap: 3px;
-      padding: 8px 9px;
+      align-content: center;
+      padding: 5px 8px;
       overflow: hidden;
       border: 1px solid rgba(255, 255, 255, 0.12);
       border-radius: 8px;
@@ -1215,15 +2301,45 @@ export class CatanApp extends LitElement {
       text-transform: uppercase;
     }
 
-    .actions-grid {
+    .actions-layout {
       display: grid;
       width: 100%;
       height: 100%;
       min-width: 0;
       min-height: 0;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: minmax(0, 1fr) minmax(74px, 0.36fr);
       gap: 7px;
       padding: 9px;
+      overflow: hidden;
+    }
+
+    .action-section {
+      display: grid;
+      min-width: 0;
+      min-height: 0;
+      grid-template-rows: auto minmax(0, 1fr);
+      gap: 6px;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 7px;
+      background: rgba(0, 0, 0, 0.12);
+      padding: 7px;
+    }
+
+    .shop-action-grid {
+      display: grid;
+      min-width: 0;
+      min-height: 0;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-rows: repeat(2, minmax(0, 1fr));
+      gap: 6px;
+      overflow: hidden;
+    }
+
+    .turn-action-grid {
+      display: grid;
+      min-width: 0;
+      min-height: 0;
       overflow: hidden;
     }
 
@@ -1240,6 +2356,12 @@ export class CatanApp extends LitElement {
       border-radius: 7px;
       background: rgba(255, 255, 255, 0.08);
       text-align: left;
+    }
+
+    .action-button.end-turn {
+      align-items: center;
+      text-align: center;
+      background: rgba(255, 255, 255, 0.12);
     }
 
     .action-button.active {
@@ -1469,19 +2591,27 @@ export class CatanApp extends LitElement {
     super.connectedCallback();
     window.addEventListener("keydown", this.handleKeyDown);
     window.addEventListener("keyup", this.handleKeyUp);
+    this.startDiceTimer();
   }
 
   disconnectedCallback() {
     window.removeEventListener("keydown", this.handleKeyDown);
     window.removeEventListener("keyup", this.handleKeyUp);
     this.removeDragListeners();
+    this.clearToastTimers();
+    this.clearDiceTimer();
     super.disconnectedCallback();
   }
 
   render() {
+    const showTurnControls = this.isTurnPlayerPerspective();
     const regions = deriveRegions(this.layout, {
       tradeOpen: this.tradeOpen,
       expandedLogOpen: this.expandedLogOpen,
+      activePlayerCount: this.activePlayerCount,
+      cheatsCollapsed: this.cheatsCollapsed,
+      showActions: showTurnControls,
+      showTradeShortcut: showTurnControls || this.tradeOpen,
     });
     const selectedRegion =
       regions.find((region) => region.id === this.selectedRegionId) ?? regions[0];
@@ -1533,8 +2663,8 @@ export class CatanApp extends LitElement {
     switch (region.id) {
       case "board":
         return this.renderBoardBackdrop();
-      case "status":
-        return this.renderStatusRegion();
+      case "turn-region":
+        return this.renderTurnRegion();
       case "players":
         return this.renderPlayersRegion();
       case "trade-main":
@@ -1549,6 +2679,10 @@ export class CatanApp extends LitElement {
         return this.renderExpandedLogRegion();
       case "toast-region":
         return this.renderToastRegion();
+      case "cheats":
+        return this.renderCheatsRegion();
+      case "pending-trades":
+        return this.renderPendingTradesRegion();
       case "trade-button":
         return this.renderTradeShortcut();
       case "hand":
@@ -1571,125 +2705,682 @@ export class CatanApp extends LitElement {
     `;
   }
 
-  private renderStatusRegion() {
-    const diceTotal = MOCK_STATUS.dice[0] + MOCK_STATUS.dice[1];
+  private renderTurnRegion() {
+    const activePlayer = this.activePlayer();
 
     return html`
       <div class="status-shell">
-        ${this.renderStatCell("Turn", MOCK_STATUS.activePlayer)}
-        ${this.renderStatCell("Phase", MOCK_STATUS.phase)}
-        ${this.renderStatCell("Dice", `${MOCK_STATUS.dice.join("+")}=${diceTotal}`)}
-        ${this.renderStatCell("Round", String(MOCK_STATUS.round))}
-        <div class="status-prompt">${MOCK_STATUS.prompt}</div>
+        <span class="turn-state-title">Turn ${activePlayer.name}</span>
+        <button
+          class=${this.diceRolled ? "dice-roll-button" : "dice-roll-button rolling"}
+          type="button"
+          @click=${this.rollDice}
+          aria-label=${this.diceRolled
+            ? `Rolled ${this.diceValues[0]} and ${this.diceValues[1]}`
+            : "Roll dice"}
+        >
+          ${this.renderDie(this.diceValues[0])}
+          ${this.renderDie(this.diceValues[1])}
+        </button>
       </div>
     `;
   }
 
-  private renderStatCell(label: string, value: string) {
+  private renderDie(value: number) {
+    const visiblePips = new Set(DIE_PIPS[value] ?? []);
+
     return html`
-      <div class="stat-cell">
-        <span class="stat-label">${label}</span>
-        <span class="stat-value">${value}</span>
-      </div>
+      <span class="die" aria-hidden="true">
+        ${Array.from({ length: 9 }, (_, index) => html`
+          <span class=${visiblePips.has(index) ? "die-pip visible" : "die-pip"}></span>
+        `)}
+      </span>
     `;
   }
 
   private renderPlayersRegion() {
+    const players = this.activePlayers();
+
     return html`
-      <div class="players-grid">
-        ${MOCK_PLAYERS.map((player) => this.renderPlayer(player))}
+      <div
+        class="players-grid"
+        style=${`--player-columns: ${playerColumnCount(players.length)}`}
+      >
+        ${players.map((player) => this.renderPlayer(player))}
       </div>
     `;
   }
 
   private renderPlayer(player: MockPlayer) {
+    const isPerspectivePlayer = player.id === this.perspectivePlayerId;
+    const isActivePlayer = player.id === this.activePlayerId;
+    const resourceTotal = countResources(this.playerHands[player.id] ?? {});
     const classes = [
       "player-tile",
-      player.isActive ? "active" : "",
+      isActivePlayer ? "active" : "",
       this.selectedPlayerId === player.id ? "selected" : "",
     ]
       .filter(Boolean)
       .join(" ");
-    const ports = player.ports.join("/");
 
     return html`
       <button
         class=${classes}
         type="button"
         style=${`--player-color: ${player.color}`}
-        @click=${() => {
-          this.selectedPlayerId = player.id;
-        }}
+        @click=${() => this.switchPerspectivePlayer(player.id)}
       >
         <span class="player-color-bar" aria-hidden="true"></span>
         <span class="player-name-line">
           <span class="player-name">${player.name}</span>
-          ${player.isYou ? html`<span class="tag">You</span>` : html``}
-          ${player.isActive ? html`<span class="tag">Turn</span>` : html``}
+          ${isPerspectivePlayer ? html`<span class="tag">You</span>` : html``}
+          ${isActivePlayer ? html`<span class="tag">Turn</span>` : html``}
         </span>
         <span class="player-metrics">
-          ${player.victoryPoints}VP ${player.resources}R ${player.devCards}D
+          ${player.victoryPoints}VP ${resourceTotal}R ${player.devCards}D
         </span>
         <span class="player-pieces">
           Rd${player.roads} S${player.settlements} C${player.cities} A${player.army}
         </span>
-        <span class="player-ports">${ports}</span>
       </button>
     `;
   }
 
-  private renderTradeMainRegion() {
+  private renderPendingTradesRegion() {
     return html`
-      <div class="trade-main-shell">
-        <section class="trade-block">
-          <span class="trade-title">Offer</span>
-          <div class="resource-grid">
-            ${["Brick x2", "Lumber x1", "Ore x0", "Grain x1"].map(
-              (item) => html`<span class="resource-pill">${item}</span>`,
-            )}
-          </div>
-          <span class="trade-text">Draft resources to send.</span>
-        </section>
-        <section class="trade-block">
-          <span class="trade-title">Request</span>
-          <div class="resource-grid">
-            ${["Sheep x1", "Ore x1", "Any x0", "Port x1"].map(
-              (item) => html`<span class="resource-pill">${item}</span>`,
-            )}
-          </div>
-          <span class="trade-text">Target player or table offer.</span>
-        </section>
-        <section class="trade-block">
-          <span class="trade-title">Responses</span>
-          <div class="resource-grid">
-            ${["Ben ok", "Chloe counter", "Drew no", "Bank open"].map(
-              (item) => html`<span class="resource-pill">${item}</span>`,
-            )}
-          </div>
-          <span class="trade-text">Mock response slots.</span>
-        </section>
+      <div class="pending-trades-shell">
+        <div class="pending-trade-list">
+          ${this.pendingTradeRequests.map((trade) => this.renderPendingTradeRow(trade))}
+        </div>
       </div>
     `;
   }
 
-  private renderBankTradesRegion() {
+  private renderPendingTradeRow(trade: PendingTradeRequest) {
+    const selected = this.selectedTradeRequestId === trade.id;
+
     return html`
-      <div class="bank-trades-shell">
-        ${MOCK_BANK_TRADES.map(
-          (trade) => html`
+      <article
+        class=${selected ? "pending-trade-row selected" : "pending-trade-row"}
+        @click=${() => this.openPendingTrade(trade.id)}
+      >
+        ${trade.kind === "counter"
+          ? html`<span class="pending-trade-kind-marker">Counter Offer</span>`
+          : html``}
+        <div class="pending-trade-body">
+          ${this.renderTradePreviewBlock(trade, "feature")}
+          <section class="pending-trade-players">
+            <div class="pending-trade-player-list">
+              ${trade.responses.map((response) =>
+                this.renderPlayerToken(response.playerId, response.state, false, trade.id),
+              )}
+            </div>
+          </section>
+        </div>
+        ${this.renderPendingTradeContextActions(trade)}
+      </article>
+    `;
+  }
+
+  private renderPendingTradeContextActions(trade: PendingTradeRequest) {
+    const actions = this.pendingTradeContextActions(trade);
+
+    return html`
+      <div
+        class="pending-trade-context-actions"
+        style=${`--pending-action-columns: ${actions.length}`}
+      >
+        ${actions.map(
+          (action) => html`
             <button
-              class="bank-trade-button"
+              class=${action.primary
+                ? "pending-trade-context-button primary"
+                : "pending-trade-context-button"}
               type="button"
-              style=${`--resource-color: ${resourceColor(trade.resource)}`}
-              ?disabled=${!trade.enabled}
+              @click=${(event: MouseEvent) => {
+                event.stopPropagation();
+                action.run();
+              }}
+              ?disabled=${Boolean(action.disabled)}
             >
-              <span class="resource-mark" aria-hidden="true"></span>
-              <span class="bank-resource">${trade.resource}</span>
-              <span class="bank-cost">${trade.cost}</span>
+              ${action.label}
             </button>
           `,
         )}
       </div>
+    `;
+  }
+
+  private pendingTradeContextActions(trade: PendingTradeRequest): Array<{
+    label: string;
+    primary?: boolean;
+    disabled?: boolean;
+    run: () => void;
+  }> {
+    if (this.perspectivePlayerId === trade.senderId) {
+      return [
+        {
+          label: "Dismiss",
+          run: () => this.dismissPendingTrade(trade.id),
+        },
+        {
+          label: "Edit",
+          primary: true,
+          run: () => this.editPendingTrade(trade.id),
+        },
+      ];
+    }
+
+    return [
+      {
+        label: "Accept",
+        primary: true,
+        disabled: !this.canPlayerAffordTrade(trade, this.perspectivePlayerId),
+        run: () => this.setPendingTradeResponse(trade.id, "accepted"),
+      },
+      {
+        label: "Reject",
+        run: () => this.setPendingTradeResponse(trade.id, "declined"),
+      },
+      {
+        label: "Counter",
+        run: () => this.openPendingTrade(trade.id),
+      },
+    ];
+  }
+
+  private renderTradeMainRegion() {
+    const canEditBuilder = this.canEditTradeBuilder();
+    const matchedTrade = this.currentTradeMatch();
+    const canCreateTrade =
+      canEditBuilder &&
+      !matchedTrade &&
+      canSendTrade(this.tradeGive, this.tradeGet) &&
+      this.canAffordTradeGive();
+    const canClear = hasAnyResources(this.tradeGive) || hasAnyResources(this.tradeGet);
+    const statusText = this.tradeBuilderStatusText(matchedTrade, canCreateTrade);
+    const controls = this.tradeBuilderControls(matchedTrade, canCreateTrade);
+    const exchangeClasses = [
+      "trade-workspace",
+      "trade-exchange-region",
+      this.canDropOnTradeBuilder() ? "drop-ready" : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+
+    return html`
+      <div class="trade-main-shell">
+        <section class="trade-picker">
+          <span class="trade-section-title">You Want</span>
+          <div class="trade-resource-row">
+            ${RESOURCE_KINDS.map((resource) =>
+              this.renderWantResource(resource, !canEditBuilder),
+            )}
+          </div>
+        </section>
+        <header class="trade-builder-header">
+          <span class="trade-builder-heading">You Get / You Give</span>
+          <button
+            class="trade-clear-button"
+            type="button"
+            ?disabled=${!canClear}
+            @click=${this.clearTrade}
+          >
+            Clear
+          </button>
+        </header>
+        <section
+          class=${exchangeClasses}
+          @dragover=${this.handleTradeBuilderDragOver}
+          @drop=${this.dropOnTradeBuilder}
+        >
+          ${this.renderTradeTray(
+            "get",
+            "You Get",
+            this.tradeGet,
+            "Drop wanted resources here.",
+            canEditBuilder,
+          )}
+          ${this.renderTradeTray(
+            "give",
+            "You Give",
+            this.tradeGive,
+            "Drop hand resources here.",
+            canEditBuilder,
+          )}
+        </section>
+        <footer class="trade-controls">
+          <div class="trade-control-actions">
+            ${controls.map((control) => this.renderTradeControl(control))}
+          </div>
+          <span class="trade-status">${statusText}</span>
+        </footer>
+      </div>
+    `;
+  }
+
+  private renderTradeControl(control: TradeControl) {
+    return html`
+      <button
+        class=${control.primary
+          ? "trade-control-button primary"
+          : "trade-control-button"}
+        type="button"
+        ?disabled=${Boolean(control.disabled)}
+        @click=${control.run}
+      >
+        ${control.label}
+      </button>
+    `;
+  }
+
+  private tradeBuilderControls(
+    matchedTrade: PendingTradeMatch | undefined,
+    canCreateTrade: boolean,
+  ): TradeControl[] {
+    if (matchedTrade) {
+      if (matchedTrade.isSender) {
+        return [
+          {
+            label: "Cancel Trade",
+            primary: true,
+            run: () => this.dismissPendingTrade(matchedTrade.trade.id),
+          },
+        ];
+      }
+
+      const response = matchedTrade.response;
+
+      if (!response) {
+        return [];
+      }
+
+      const canAccept = this.canAffordTradeGive();
+
+      switch (response.state) {
+        case "pending":
+          return [
+            {
+              label: "Accept",
+              primary: true,
+              disabled: !canAccept,
+              run: () => this.setPendingTradeResponse(matchedTrade.trade.id, "accepted"),
+            },
+            {
+              label: "Reject",
+              run: () => this.setPendingTradeResponse(matchedTrade.trade.id, "declined"),
+            },
+            {
+              label: "Counter",
+              run: () => this.openPendingTrade(matchedTrade.trade.id),
+            },
+          ];
+        case "accepted":
+          return [
+            {
+              label: "Decline Response",
+              run: () => this.setPendingTradeResponse(matchedTrade.trade.id, "declined"),
+            },
+          ];
+        case "declined":
+          return [
+            {
+              label: "Accept",
+              primary: true,
+              disabled: !canAccept,
+              run: () => this.setPendingTradeResponse(matchedTrade.trade.id, "accepted"),
+            },
+            {
+              label: "Counter",
+              run: () => this.openPendingTrade(matchedTrade.trade.id),
+            },
+          ];
+      }
+    }
+
+    return [
+      {
+        label: this.isTurnPlayerPerspective() ? "Send Trade" : "Counter Offer",
+        primary: true,
+        disabled: !canCreateTrade,
+        run: this.createTradeRequest,
+      },
+    ];
+  }
+
+  private tradeBuilderStatusText(
+    matchedTrade: PendingTradeMatch | undefined,
+    canCreateTrade: boolean,
+  ): string {
+    if (matchedTrade) {
+      if (matchedTrade.isSender) {
+        return matchedTrade.trade.kind === "counter"
+          ? "Counter offer already sent."
+          : "Trade already sent.";
+      }
+
+      const response = matchedTrade.response;
+
+      if (!response) {
+        return "No response needed.";
+      }
+
+      if (response.state === "accepted") {
+        return "You accepted this trade.";
+      }
+
+      if (response.state === "declined") {
+        return "You declined this trade.";
+      }
+
+      return "This trade is waiting for your response.";
+    }
+
+    if (!canSendTrade(this.tradeGive, this.tradeGet)) {
+      return "Drag resources into You Get / You Give.";
+    }
+
+    if (!this.canAffordTradeGive()) {
+      return "Not enough resources in hand.";
+    }
+
+    return canCreateTrade
+      ? this.isTurnPlayerPerspective()
+        ? "Ready to send."
+        : "Ready to counter."
+      : "Trade already exists.";
+  }
+
+  private renderWantResource(resource: ResourceKind, disabled: boolean) {
+    return html`
+      <button
+        class=${disabled
+          ? "resource-card want-resource-card disabled"
+          : "resource-card want-resource-card"}
+        type="button"
+        draggable=${disabled ? "false" : "true"}
+        style=${`--resource-color: ${resourceColor(resource)}`}
+        ?disabled=${disabled}
+        @dragstart=${(event: DragEvent) =>
+          this.startTradeDrag(event, { source: "want", resource })}
+        @dragend=${this.endTradeDrag}
+      >
+        <span class="resource-card-name">${resource}</span>
+        <span class="resource-card-count">Request</span>
+      </button>
+    `;
+  }
+
+  private renderTradeTray(
+    side: TradeSide,
+    title: string,
+    counts: ResourceCounts,
+    emptyText: string,
+    canEdit: boolean,
+  ) {
+    const resources = RESOURCE_KINDS.filter((resource) => resourceCount(counts, resource) > 0);
+
+    return html`
+      <section class="trade-tray">
+        <header class="trade-tray-header">
+          <span class="trade-section-title">${title}</span>
+          <span class="trade-tray-count">${countResources(counts)}</span>
+        </header>
+        <div class="trade-tray-content">
+          ${resources.length > 0
+            ? resources.map((resource) =>
+                this.renderSelectedTradeResource(
+                  side,
+                  resource,
+                  resourceCount(counts, resource),
+                  canEdit,
+                ),
+              )
+            : html`<span class="trade-empty">${emptyText}</span>`}
+        </div>
+      </section>
+    `;
+  }
+
+  private renderSelectedTradeResource(
+    side: TradeSide,
+    resource: ResourceKind,
+    count: number,
+    canEdit: boolean,
+  ) {
+    return html`
+      <button
+        class=${canEdit
+          ? "resource-card selected-trade-card"
+          : "resource-card selected-trade-card disabled"}
+        type="button"
+        draggable=${canEdit ? "true" : "false"}
+        title="Drag away to remove"
+        style=${`--resource-color: ${resourceColor(resource)}`}
+        ?disabled=${!canEdit}
+        @dragstart=${(event: DragEvent) =>
+          this.startTradeDrag(event, { source: side, resource })}
+        @dragend=${this.endTradeDrag}
+      >
+        <span class="resource-card-name">${resource}</span>
+        <span class="resource-card-count">x${count}</span>
+      </button>
+    `;
+  }
+
+  private renderTradePreviewBlock(
+    trade: PendingTradeRequest,
+    scale: "feature" | "compact",
+  ) {
+    const displayedTrade = tradeForPerspective(trade, this.perspectivePlayerId);
+
+    return html`
+      <div class=${`trade-preview-block ${scale}`} aria-label=${trade.label}>
+        <div class="trade-preview-half trade-preview-get">
+          ${this.renderTradePreviewResources(displayedTrade.get, "None")}
+        </div>
+        <span class="trade-preview-divider" aria-hidden="true"></span>
+        <div class="trade-preview-half trade-preview-give">
+          ${this.renderTradePreviewResources(displayedTrade.give, "None")}
+        </div>
+      </div>
+    `;
+  }
+
+  private renderTradePreviewResources(counts: ResourceCounts, emptyText: string) {
+    const resources = RESOURCE_KINDS.filter((resource) => resourceCount(counts, resource) > 0);
+
+    if (resources.length === 0) {
+      return html`<span class="trade-preview-empty">${emptyText}</span>`;
+    }
+
+    return resources.map((resource) =>
+      this.renderTradePreviewResource(resource, resourceCount(counts, resource)),
+    );
+  }
+
+  private renderTradePreviewResource(resource: ResourceKind, count: number) {
+    return html`
+      <span
+        class="trade-preview-resource"
+        style=${`--resource-color: ${resourceColor(resource)}`}
+      >
+        <span class="trade-preview-resource-name">${resource}</span>
+        <span class="trade-preview-resource-count">${count > 1 ? `x${count}` : ""}</span>
+      </span>
+    `;
+  }
+
+  private renderPlayerToken(
+    playerId: PlayerId,
+    responseState: TradeResponseState,
+    compact: boolean,
+    tradeId?: string,
+  ) {
+    const player = playerById(playerId);
+    const playerName = player?.name ?? playerId;
+    const playerColor = player?.color ?? "#8c96a3";
+    const classes = [
+      "player-token",
+      `state-${responseState}`,
+      compact ? "compact" : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+
+    const content = html`
+      <span class="player-token-dot" aria-hidden="true"></span>
+      <span class="player-token-name">${playerName}</span>
+    `;
+    const title = `${playerName}: ${TRADE_RESPONSE_LABELS[responseState]}`;
+
+    if (tradeId) {
+      return html`
+        <button
+          class=${classes}
+          type="button"
+          style=${`--player-color: ${playerColor}`}
+          title=${title}
+          @click=${(event: MouseEvent) => {
+            event.stopPropagation();
+            this.cyclePendingTradePlayer(tradeId, playerId);
+          }}
+        >
+          ${content}
+        </button>
+      `;
+    }
+
+    return html`
+      <span
+        class=${classes}
+        style=${`--player-color: ${playerColor}`}
+        title=${title}
+      >
+        ${content}
+      </span>
+    `;
+  }
+
+  private renderBankTradesRegion() {
+    const handCounts = this.currentHandCounts();
+    const ports = this.currentPorts();
+    const bankTrades = RESOURCE_KINDS.map((resource) => {
+      const payments = bankPaymentOptions(resource, handCounts, ports);
+      const available = payments.some((payment) => payment.available);
+
+      return {
+        resource,
+        payments,
+        available,
+      };
+    });
+    const selectedTrade = this.selectedBankTradeResource
+      ? bankTrades.find((trade) => trade.resource === this.selectedBankTradeResource)
+      : undefined;
+
+    return html`
+      <div class="bank-trades-shell">
+        ${bankTrades.map((trade) => this.renderBankTradeButton(trade))}
+        ${selectedTrade ? this.renderBankPaymentPopover(selectedTrade) : html``}
+      </div>
+    `;
+  }
+
+  private renderBankTradeButton(trade: {
+    resource: ResourceKind;
+    payments: BankPaymentOption[];
+    available: boolean;
+  }) {
+    const selected = this.selectedBankTradeResource === trade.resource;
+    const classes = [
+      "bank-trade-button",
+      trade.available ? "" : "unavailable",
+      selected ? "selected" : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+
+    return html`
+      <button
+        class=${classes}
+        type="button"
+        style=${`--resource-color: ${resourceColor(trade.resource)}`}
+        @click=${() => this.openBankPaymentOptions(trade.resource)}
+      >
+        <span class="bank-trade-header">
+          <span class="resource-mark" aria-hidden="true"></span>
+          <span class="bank-resource">${trade.resource}</span>
+        </span>
+        <span class="bank-cost-grid">
+          ${trade.payments.map((payment) => this.renderBankCostColumn(payment))}
+        </span>
+      </button>
+    `;
+  }
+
+  private renderBankCostColumn(payment: BankPaymentOption) {
+    const classes = payment.available
+      ? "bank-cost-column"
+      : "bank-cost-column unavailable";
+
+    return html`
+      <span
+        class=${classes}
+        style=${`--payment-color: ${resourceColor(payment.resource)}`}
+        title=${`${payment.cost} ${payment.resource}`}
+      >
+        ${[0, 1, 2, 3].map(
+          (index) => html`
+            <span
+              class=${index < payment.cost
+                ? "bank-cost-dot filled"
+                : "bank-cost-dot"}
+              aria-hidden="true"
+            ></span>
+          `,
+        )}
+        <span class="bank-cost-number">${payment.cost}</span>
+      </span>
+    `;
+  }
+
+  private renderBankPaymentPopover(trade: {
+    resource: ResourceKind;
+    payments: BankPaymentOption[];
+    available: boolean;
+  }) {
+    return html`
+      <aside class="bank-payment-popover">
+        <header class="bank-payment-header">
+          <span class="bank-payment-title">Pay for ${trade.resource}</span>
+          <button
+            class="bank-payment-close"
+            type="button"
+            @click=${this.closeBankPaymentOptions}
+          >
+            x
+          </button>
+        </header>
+        <div class="bank-payment-options">
+          ${trade.payments.map(
+            (payment) => html`
+              <button
+                class="bank-payment-option"
+                type="button"
+                style=${`--resource-color: ${resourceColor(payment.resource)}`}
+                ?disabled=${!payment.available}
+                @click=${() => this.performBankTrade(trade.resource, payment.resource)}
+              >
+                <span class="resource-mark" aria-hidden="true"></span>
+                <span class="bank-payment-text">
+                  ${payment.cost} ${payment.resource}
+                </span>
+              </button>
+            `,
+          )}
+        </div>
+      </aside>
     `;
   }
 
@@ -1751,7 +3442,7 @@ export class CatanApp extends LitElement {
   private renderToastRegion() {
     return html`
       <div class="toast-shell">
-        ${MOCK_TOASTS.map(
+        ${this.toasts.map(
           (toast) => html`
             <div
               class="toast"
@@ -1762,6 +3453,99 @@ export class CatanApp extends LitElement {
             </div>
           `,
         )}
+      </div>
+    `;
+  }
+
+  private renderCheatsRegion() {
+    const handCounts = this.currentHandCounts();
+    const ports = this.currentPorts();
+
+    return html`
+      <div class=${this.cheatsCollapsed ? "cheats-shell collapsed" : "cheats-shell"}>
+        <button class="cheat-header-button" type="button" @click=${this.toggleCheats}>
+          <span class="cheat-header-title">Cheat UI</span>
+          <span class="cheat-header-state">
+            ${this.cheatsCollapsed ? "Expand" : "Minimize"}
+          </span>
+        </button>
+        ${this.cheatsCollapsed
+          ? html``
+          : html`
+              <div class="cheat-top-row">
+                <button class="cheat-button" type="button" @click=${this.cyclePlayerCount}>
+                  Players ${this.activePlayerCount}
+                </button>
+                <button class="cheat-button" type="button" @click=${this.addRandomToast}>
+                  Toast
+                </button>
+              </div>
+              <div class="cheat-port-grid">
+                ${RESOURCE_KINDS.map((resource) =>
+                  this.renderPortCheat(
+                    `${resource} Port`,
+                    resource,
+                    Boolean(ports[resource]),
+                  ),
+                )}
+                ${this.renderPortCheat(
+                  "3:1 Port",
+                  "ThreeToOne",
+                  Boolean(ports.ThreeToOne),
+                )}
+              </div>
+              <div class="cheat-resource-grid">
+                ${RESOURCE_KINDS.map((resource) =>
+                  this.renderResourceCheat(resource, resourceCount(handCounts, resource)),
+                )}
+              </div>
+            `}
+      </div>
+    `;
+  }
+
+  private toggleCheats = () => {
+    this.cheatsCollapsed = !this.cheatsCollapsed;
+  };
+
+  private renderPortCheat(label: string, port: PortKind, enabled: boolean) {
+    return html`
+      <button
+        class=${enabled ? "cheat-button active" : "cheat-button"}
+        type="button"
+        @click=${() => this.toggleCurrentPlayerPort(port)}
+      >
+        ${label}
+      </button>
+    `;
+  }
+
+  private renderResourceCheat(resource: ResourceKind, count: number) {
+    return html`
+      <div class="cheat-resource-row">
+        <span
+          class="cheat-resource-label"
+          style=${`--resource-color: ${resourceColor(resource)}`}
+        >
+          <span class="cheat-resource-dot" aria-hidden="true"></span>
+          <span class="cheat-resource-name">${resource}</span>
+          <span class="cheat-resource-count">${count}</span>
+        </span>
+        <button
+          class="cheat-button"
+          type="button"
+          ?disabled=${count <= 0}
+          @click=${() => this.updateCurrentHandResource(resource, -1)}
+        >
+          -
+        </button>
+        <button
+          class="cheat-button"
+          type="button"
+          @click=${() => this.updateCurrentHandResource(resource, 1)}
+        >
+          +
+        </button>
       </div>
     `;
   }
@@ -1783,44 +3567,99 @@ export class CatanApp extends LitElement {
   }
 
   private renderHandPlaceholder(region: LayoutRegion) {
+    const handCounts = this.currentHandCounts();
+    const playerName = playerById(this.perspectivePlayerId)?.name ?? "Player";
+    const totalResources = countResources(handCounts);
+    const availableResources = RESOURCE_KINDS.reduce(
+      (total, resource) => total + this.availableHandCount(resource),
+      0,
+    );
+
     return html`
       <div class="hand-shell">
         <header class="hand-header">
-          <span class="hand-title">${region.name}</span>
+          <span class="hand-title">${playerName} ${region.name}</span>
           <span class="hand-counts">
-            <span class="tag">9 resources</span>
-            <span class="tag">1 dev</span>
+            <span class="tag">${availableResources}/${totalResources} resources</span>
           </span>
         </header>
         <div class="hand-grid">
-          ${["Brick", "Lumber", "Ore", "Grain", "Wool"].map(
-            (slot) => html`<div class="hand-slot">${slot}</div>`,
-          )}
+          ${RESOURCE_KINDS.map((resource) => this.renderHandResource(resource))}
         </div>
       </div>
     `;
   }
 
-  private renderActionsRegion() {
+  private renderHandResource(resource: ResourceKind) {
+    const owned = resourceCount(this.currentHandCounts(), resource);
+    const available = this.availableHandCount(resource);
+    const disabled = available <= 0;
+
     return html`
-      <div class="actions-grid">
-        ${MOCK_ACTIONS.map((action) => {
-          const active = this.selectedActionId === action.id;
-          return html`
-            <button
-              class=${active ? "action-button active" : "action-button"}
-              type="button"
-              ?disabled=${!action.enabled}
-              @click=${() => {
-                this.selectedActionId = action.id;
-              }}
-            >
-              <span class="action-label">${action.label}</span>
-              <span class="action-detail">${action.detail}</span>
-            </button>
-          `;
-        })}
+      <button
+        class=${disabled ? "hand-slot resource-card disabled" : "hand-slot resource-card"}
+        type="button"
+        draggable=${disabled ? "false" : "true"}
+        style=${`--resource-color: ${resourceColor(resource)}`}
+        ?disabled=${disabled}
+        @dragstart=${(event: DragEvent) =>
+          this.startTradeDrag(event, { source: "hand", resource })}
+        @dragend=${this.endTradeDrag}
+      >
+        <span class="resource-card-name">${resource}</span>
+        <span class="resource-card-count">${available}/${owned}</span>
+      </button>
+    `;
+  }
+
+  private renderActionsRegion() {
+    const nextPlayer = playerById(this.nextActivePlayerId());
+    const endTurnAction = {
+      ...END_TURN_ACTION,
+      detail: nextPlayer?.name ?? END_TURN_ACTION.detail,
+    };
+
+    return html`
+      <div class="actions-layout">
+        <section class="action-section">
+          <span class="micro-label">Shop</span>
+          <div class="shop-action-grid">
+            ${SHOP_ACTIONS.map((action) => this.renderActionButton(action))}
+          </div>
+        </section>
+        <section class="action-section">
+          <span class="micro-label">Turn</span>
+          <div class="turn-action-grid">
+            ${this.renderActionButton(endTurnAction, "end-turn")}
+          </div>
+        </section>
       </div>
+    `;
+  }
+
+  private renderActionButton(action: MockAction, variant = "") {
+    const active = this.selectedActionId === action.id;
+    const classes = ["action-button", active ? "active" : "", variant]
+      .filter(Boolean)
+      .join(" ");
+
+    return html`
+      <button
+        class=${classes}
+        type="button"
+        ?disabled=${!action.enabled}
+        @click=${() => {
+          if (action.id === "end-turn") {
+            this.endTurn();
+            return;
+          }
+
+          this.selectedActionId = action.id;
+        }}
+      >
+        <span class="action-label">${action.label}</span>
+        <span class="action-detail">${action.detail}</span>
+      </button>
     `;
   }
 
@@ -1891,17 +3730,29 @@ export class CatanApp extends LitElement {
 
           <div class="settings-section">
             <h2 class="settings-heading">Left UI</h2>
-            ${(["statusHeight", "playersHeight", "bankTradesHeight"] as const).map(
-              (field) => this.renderMetricInput(field),
+            ${(["bankTradesHeight"] as const).map((field) =>
+              this.renderMetricInput(field),
             )}
+          </div>
+
+          <div class="settings-section">
+            <h2 class="settings-heading">Pending Trades</h2>
+            ${(["pendingTradesWidth"] as const).map((field) =>
+              this.renderMetricInput(field),
+            )}
+          </div>
+
+          <div class="settings-section">
+            <h2 class="settings-heading">Turn Region</h2>
+            ${(["statusHeight"] as const).map((field) => this.renderMetricInput(field))}
           </div>
 
           <div class="settings-section">
             <h2 class="settings-heading">Right UI</h2>
             ${([
               "rightToolsHeight",
-              "logHeight",
               "minimalLogHeight",
+              "playersHeight",
             ] as const).map((field) => this.renderMetricInput(field))}
           </div>
 
@@ -1981,7 +3832,590 @@ export class CatanApp extends LitElement {
   };
 
   private toggleTradeRegion = () => {
-    this.tradeOpen = !this.tradeOpen;
+    if (this.tradeOpen) {
+      this.tradeOpen = false;
+      this.selectedTradeRequestId = null;
+      return;
+    }
+
+    if (!this.isTurnPlayerPerspective()) {
+      return;
+    }
+
+    this.selectedTradeRequestId = null;
+    this.tradeOpen = true;
+  };
+
+  private startDiceTimer() {
+    this.clearDiceTimer();
+    this.diceTimer = window.setInterval(() => {
+      if (!this.diceRolled) {
+        this.diceValues = randomAnimatedDicePair(this.diceValues);
+      }
+    }, DICE_ROLL_INTERVAL_MS);
+  }
+
+  private clearDiceTimer() {
+    if (this.diceTimer === undefined) {
+      return;
+    }
+
+    window.clearInterval(this.diceTimer);
+    this.diceTimer = undefined;
+  }
+
+  private rollDice = () => {
+    if (this.diceRolled) {
+      return;
+    }
+
+    this.diceValues = randomDicePair();
+    this.diceRolled = true;
+  };
+
+  private resetDiceForTurn() {
+    this.diceValues = randomDicePair();
+    this.diceRolled = false;
+  }
+
+  private activePlayer(): MockPlayer {
+    return (
+      this.activePlayers().find((player) => player.id === this.activePlayerId) ??
+      this.activePlayers()[0] ??
+      MOCK_PLAYERS[0]
+    );
+  }
+
+  private nextActivePlayerId(): PlayerId {
+    const players = this.activePlayers();
+    const currentIndex = players.findIndex((player) => player.id === this.activePlayerId);
+    const nextIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % players.length;
+
+    return players[nextIndex]?.id ?? ACTIVE_PLAYER_ID;
+  }
+
+  private endTurn = () => {
+    if (!this.isTurnPlayerPerspective()) {
+      return;
+    }
+
+    this.activePlayerId = this.nextActivePlayerId();
+    this.pendingTradeRequests = [];
+    this.selectedTradeRequestId = null;
+    this.tradeGive = {};
+    this.tradeGet = {};
+    this.selectedBankTradeResource = null;
+    this.tradeOpen = this.isTurnPlayerPerspective();
+    this.selectedActionId = "build-road";
+    this.resetDiceForTurn();
+  };
+
+  private activePlayers(): MockPlayer[] {
+    return MOCK_PLAYERS.slice(0, this.activePlayerCount);
+  }
+
+  private isTurnPlayerPerspective(): boolean {
+    return this.perspectivePlayerId === this.activePlayerId;
+  }
+
+  private canEditTradeBuilder(): boolean {
+    return this.tradeOpen;
+  }
+
+  private currentTradeMatch(): PendingTradeMatch | undefined {
+    if (!canSendTrade(this.tradeGive, this.tradeGet)) {
+      return undefined;
+    }
+
+    const matchingTrades = this.pendingTradeRequests.filter((pendingTrade) => {
+      const displayedTrade = tradeForPerspective(
+        pendingTrade,
+        this.perspectivePlayerId,
+      );
+
+      return (
+        resourceCountsEqual(displayedTrade.give, this.tradeGive) &&
+        resourceCountsEqual(displayedTrade.get, this.tradeGet)
+      );
+    });
+    const trade =
+      matchingTrades.find(({ id }) => id === this.selectedTradeRequestId) ??
+      matchingTrades[0];
+
+    if (!trade) {
+      return undefined;
+    }
+
+    return {
+      trade,
+      isSender: trade.senderId === this.perspectivePlayerId,
+      response: responseForPlayer(trade, this.perspectivePlayerId),
+    };
+  }
+
+  private canAffordTradeGive(): boolean {
+    return canAffordCounts(this.tradeGive, this.currentHandCounts());
+  }
+
+  private canPlayerAffordTrade(trade: PendingTradeRequest, playerId: PlayerId): boolean {
+    const displayedTrade = tradeForPerspective(trade, playerId);
+    const handCounts = this.playerHands[playerId] ?? {};
+
+    return canAffordCounts(displayedTrade.give, handCounts);
+  }
+
+  private openPendingTrade(tradeId: string) {
+    const trade = this.pendingTradeRequests.find(({ id }) => id === tradeId);
+
+    if (!trade) {
+      return;
+    }
+
+    const displayedTrade = tradeForPerspective(trade, this.perspectivePlayerId);
+
+    this.tradeGet = { ...displayedTrade.get };
+    this.tradeGive = { ...displayedTrade.give };
+    this.selectedTradeRequestId = tradeId;
+    this.tradeOpen = true;
+  }
+
+  private dismissPendingTrade(tradeId: string) {
+    this.pendingTradeRequests = this.pendingTradeRequests.filter(
+      (trade) => trade.id !== tradeId,
+    );
+
+    if (this.selectedTradeRequestId === tradeId) {
+      this.selectedTradeRequestId = null;
+      this.tradeOpen = this.isTurnPlayerPerspective();
+    }
+  }
+
+  private editPendingTrade(tradeId: string) {
+    const trade = this.pendingTradeRequests.find(({ id }) => id === tradeId);
+
+    if (!trade || trade.senderId !== this.perspectivePlayerId) {
+      return;
+    }
+
+    this.tradeGet = { ...trade.get };
+    this.tradeGive = { ...trade.give };
+    this.pendingTradeRequests = this.pendingTradeRequests.filter(({ id }) => id !== tradeId);
+    this.selectedTradeRequestId = null;
+    this.tradeOpen = true;
+  }
+
+  private switchPerspectivePlayer(playerId: PlayerId) {
+    if (!this.activePlayers().some((player) => player.id === playerId)) {
+      return;
+    }
+
+    if (playerId === this.perspectivePlayerId) {
+      this.selectedPlayerId = playerId;
+
+      if (playerId !== this.activePlayerId) {
+        this.switchTurnToPlayer(playerId);
+      }
+
+      return;
+    }
+
+    this.perspectivePlayerId = playerId;
+    this.selectedPlayerId = playerId;
+    this.selectedBankTradeResource = null;
+
+    if (playerId !== this.activePlayerId) {
+      this.tradeOpen = false;
+      this.selectedTradeRequestId = null;
+    }
+  }
+
+  private switchTurnToPlayer(playerId: PlayerId) {
+    this.activePlayerId = playerId;
+    this.pendingTradeRequests = [];
+    this.selectedTradeRequestId = null;
+    this.tradeGive = {};
+    this.tradeGet = {};
+    this.selectedBankTradeResource = null;
+    this.tradeOpen = false;
+    this.selectedActionId = "build-road";
+    this.resetDiceForTurn();
+  }
+
+  private addRandomToast = () => {
+    const template =
+      TOAST_MESSAGES[Math.floor(Math.random() * TOAST_MESSAGES.length)] ??
+      TOAST_MESSAGES[0];
+    const toast: MockToast = {
+      ...template,
+      id: `toast-${Date.now()}-${this.toastSequence++}`,
+    };
+    const nextToasts = [...this.toasts, toast];
+    const overflow = Math.max(0, nextToasts.length - MAX_VISIBLE_TOASTS);
+    const removedToasts = nextToasts.slice(0, overflow);
+
+    for (const removedToast of removedToasts) {
+      this.clearToastTimer(removedToast.id);
+    }
+
+    this.toasts = nextToasts.slice(overflow);
+    this.toastTimers.set(
+      toast.id,
+      window.setTimeout(() => this.expireToast(toast.id), TOAST_LIFETIME_MS),
+    );
+  };
+
+  private expireToast(toastId: string) {
+    this.clearToastTimer(toastId);
+    this.toasts = this.toasts.filter((toast) => toast.id !== toastId);
+  }
+
+  private clearToastTimer(toastId: string) {
+    const timer = this.toastTimers.get(toastId);
+
+    if (timer === undefined) {
+      return;
+    }
+
+    window.clearTimeout(timer);
+    this.toastTimers.delete(toastId);
+  }
+
+  private clearToastTimers() {
+    for (const timer of this.toastTimers.values()) {
+      window.clearTimeout(timer);
+    }
+
+    this.toastTimers.clear();
+  }
+
+  private cyclePlayerCount = () => {
+    const nextCount =
+      this.activePlayerCount >= MAX_PLAYER_COUNT
+        ? MIN_PLAYER_COUNT
+        : this.activePlayerCount + 1;
+    const activePlayerIds = new Set(
+      MOCK_PLAYERS.slice(0, nextCount).map((player) => player.id),
+    );
+
+    this.activePlayerCount = nextCount;
+    this.pendingTradeRequests = [];
+    this.selectedTradeRequestId = null;
+    this.selectedBankTradeResource = null;
+
+    if (!activePlayerIds.has(this.selectedPlayerId)) {
+      this.selectedPlayerId = ACTIVE_PLAYER_ID;
+    }
+
+    if (!activePlayerIds.has(this.activePlayerId)) {
+      this.activePlayerId = ACTIVE_PLAYER_ID;
+      this.resetDiceForTurn();
+    }
+
+    if (!activePlayerIds.has(this.perspectivePlayerId)) {
+      this.perspectivePlayerId = ACTIVE_PLAYER_ID;
+      this.tradeOpen = true;
+    }
+
+    if (!this.isTurnPlayerPerspective()) {
+      this.tradeOpen = false;
+    }
+  };
+
+  private cyclePendingTradePlayer(tradeId: string, playerId: PlayerId) {
+    const nextTrades = this.pendingTradeRequests
+      .map((trade) => {
+        if (trade.id !== tradeId) {
+          return trade;
+        }
+
+        return {
+          ...trade,
+          responses: trade.responses.map((response): MockTradeResponse => {
+            if (response.playerId !== playerId) {
+              return response;
+            }
+
+            const nextState = nextTradeResponseState(response.state);
+
+            if (nextState === "accepted" && !this.canPlayerAffordTrade(trade, playerId)) {
+              return { ...response, state: "declined" };
+            }
+
+            return { ...response, state: nextState };
+          }),
+        };
+      })
+      .filter((trade) => !trade.responses.every(({ state }) => state === "declined"));
+
+    this.pendingTradeRequests = nextTrades;
+
+    if (
+      this.selectedTradeRequestId === tradeId &&
+      !nextTrades.some((trade) => trade.id === tradeId)
+    ) {
+      this.selectedTradeRequestId = null;
+      this.tradeOpen = this.isTurnPlayerPerspective();
+    }
+  }
+
+  private setPendingTradeResponse(tradeId: string, state: TradeResponseState) {
+    const playerId = this.perspectivePlayerId;
+    const targetTrade = this.pendingTradeRequests.find((trade) => trade.id === tradeId);
+
+    if (
+      state === "accepted" &&
+      (!targetTrade || !this.canPlayerAffordTrade(targetTrade, playerId))
+    ) {
+      return;
+    }
+
+    const nextTrades = this.pendingTradeRequests
+      .map((trade) => {
+        if (trade.id !== tradeId) {
+          return trade;
+        }
+
+        return {
+          ...trade,
+          responses: trade.responses.map((response) =>
+            response.playerId === playerId ? { ...response, state } : response,
+          ),
+        };
+      })
+      .filter((trade) => !trade.responses.every((response) => response.state === "declined"));
+
+    this.pendingTradeRequests = nextTrades;
+
+    if (!nextTrades.some((trade) => trade.id === tradeId)) {
+      this.selectedTradeRequestId = null;
+      this.tradeOpen = this.isTurnPlayerPerspective();
+    }
+  }
+
+  private currentHandCounts(): ResourceCounts {
+    return this.playerHands[this.perspectivePlayerId] ?? {};
+  }
+
+  private currentPorts(): Partial<Record<PortKind, boolean>> {
+    return this.playerPorts[this.perspectivePlayerId] ?? {};
+  }
+
+  private updateCurrentHandResource(resource: ResourceKind, delta: number) {
+    const playerId = this.perspectivePlayerId;
+    const currentCounts = this.playerHands[playerId] ?? {};
+    const nextCount = Math.max(0, resourceCount(currentCounts, resource) + delta);
+    const nextCounts = { ...currentCounts };
+
+    if (nextCount > 0) {
+      nextCounts[resource] = nextCount;
+    } else {
+      delete nextCounts[resource];
+    }
+
+    this.setCurrentHandCounts(nextCounts);
+  }
+
+  private toggleCurrentPlayerPort(port: PortKind) {
+    const playerId = this.perspectivePlayerId;
+    const currentPorts = this.playerPorts[playerId] ?? {};
+    const nextPorts = { ...currentPorts };
+
+    if (nextPorts[port]) {
+      delete nextPorts[port];
+    } else {
+      nextPorts[port] = true;
+    }
+
+    this.playerPorts = {
+      ...this.playerPorts,
+      [playerId]: nextPorts,
+    };
+  }
+
+  private openBankPaymentOptions(resource: ResourceKind) {
+    this.selectedBankTradeResource =
+      this.selectedBankTradeResource === resource ? null : resource;
+  }
+
+  private closeBankPaymentOptions = () => {
+    this.selectedBankTradeResource = null;
+  };
+
+  private performBankTrade(targetResource: ResourceKind, paymentResource: ResourceKind) {
+    if (!this.isTurnPlayerPerspective()) {
+      return;
+    }
+
+    const handCounts = this.currentHandCounts();
+    const cost = bankTradeRatio(paymentResource, this.currentPorts());
+
+    if (
+      paymentResource === targetResource ||
+      resourceCount(handCounts, paymentResource) < cost
+    ) {
+      return;
+    }
+
+    this.setCurrentHandCounts(
+      addResourceCount(
+        removeResourceAmount(handCounts, paymentResource, cost),
+        targetResource,
+      ),
+    );
+    this.selectedBankTradeResource = null;
+  }
+
+  private availableHandCount(resource: ResourceKind): number {
+    const reservedCount = resourceCount(this.tradeGive, resource);
+
+    return Math.max(0, resourceCount(this.currentHandCounts(), resource) - reservedCount);
+  }
+
+  private setCurrentHandCounts(nextCounts: ResourceCounts) {
+    const playerId = this.perspectivePlayerId;
+
+    this.playerHands = {
+      ...this.playerHands,
+      [playerId]: nextCounts,
+    };
+
+    this.tradeGive = capResourceCounts(this.tradeGive, nextCounts);
+  }
+
+  private startTradeDrag(event: DragEvent, payload: TradeDragPayload) {
+    if (payload.source !== "hand" && !this.canEditTradeBuilder()) {
+      event.preventDefault();
+      return;
+    }
+
+    if (payload.source === "hand" && this.availableHandCount(payload.resource) <= 0) {
+      event.preventDefault();
+      return;
+    }
+
+    this.dragPayload = payload;
+    this.tradeDropHandled = false;
+    event.dataTransfer?.setData("text/plain", `${payload.source}:${payload.resource}`);
+
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed =
+        payload.source === "give" || payload.source === "get" ? "move" : "copy";
+    }
+  }
+
+  private canDropOnTradeBuilder(): boolean {
+    return Boolean(
+      this.canEditTradeBuilder() && this.dragPayload && tradeSideForPayload(this.dragPayload),
+    );
+  }
+
+  private handleTradeBuilderDragOver = (event: DragEvent) => {
+    const payload = this.dragPayload;
+
+    if (!this.canEditTradeBuilder() || !payload || !tradeSideForPayload(payload)) {
+      return;
+    }
+
+    event.preventDefault();
+
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect =
+        payload.source === "give" || payload.source === "get"
+          ? "move"
+          : "copy";
+    }
+  };
+
+  private dropOnTradeBuilder = (event: DragEvent) => {
+    if (!this.canEditTradeBuilder() || !this.dragPayload) {
+      return;
+    }
+
+    const side = tradeSideForPayload(this.dragPayload);
+
+    if (!side) {
+      return;
+    }
+
+    event.preventDefault();
+    this.tradeDropHandled = true;
+
+    if (this.dragPayload.source === "hand" || this.dragPayload.source === "want") {
+      this.addTradeResource(side, this.dragPayload.resource);
+    }
+  };
+
+  private endTradeDrag = () => {
+    const payload = this.dragPayload;
+
+    if (
+      payload &&
+      !this.tradeDropHandled &&
+      (payload.source === "give" || payload.source === "get")
+    ) {
+      this.removeTradeResource(payload.source, payload.resource);
+    }
+
+    this.dragPayload = null;
+    this.tradeDropHandled = false;
+  };
+
+  private addTradeResource(side: TradeSide, resource: ResourceKind) {
+    if (!this.canEditTradeBuilder()) {
+      return;
+    }
+
+    if (side === "give" && this.availableHandCount(resource) <= 0) {
+      return;
+    }
+
+    if (side === "give") {
+      this.tradeGive = addResourceCount(this.tradeGive, resource);
+    } else {
+      this.tradeGet = addResourceCount(this.tradeGet, resource);
+    }
+
+    this.selectedTradeRequestId = null;
+  }
+
+  private removeTradeResource(side: TradeSide, resource: ResourceKind) {
+    if (side === "give") {
+      this.tradeGive = removeResourceCount(this.tradeGive, resource);
+    } else {
+      this.tradeGet = removeResourceCount(this.tradeGet, resource);
+    }
+
+    this.selectedTradeRequestId = null;
+  }
+
+  private clearTrade = () => {
+    this.tradeGive = {};
+    this.tradeGet = {};
+    this.selectedTradeRequestId = null;
+  };
+
+  private createTradeRequest = () => {
+    if (
+      !canSendTrade(this.tradeGive, this.tradeGet) ||
+      !this.canAffordTradeGive() ||
+      this.currentTradeMatch()
+    ) {
+      return;
+    }
+
+    const tradeNumber = ++this.tradeSequence;
+    const request: PendingTradeRequest = {
+      id: `pending-trade-${tradeNumber}`,
+      label: `Trade ${tradeNumber}`,
+      kind: this.isTurnPlayerPerspective() ? "offer" : "counter",
+      senderId: this.perspectivePlayerId,
+      get: { ...this.tradeGet },
+      give: { ...this.tradeGive },
+      responses: pendingPlayerResponses(this.activePlayers(), this.perspectivePlayerId),
+    };
+
+    this.pendingTradeRequests = [...this.pendingTradeRequests, request];
+    this.selectedTradeRequestId = request.id;
   };
 
   private resetLayout = () => {
@@ -2108,6 +4542,251 @@ export class CatanApp extends LitElement {
   };
 }
 
+function tradeSideForPayload(payload: TradeDragPayload): TradeSide | null {
+  if (payload.source === "hand" || payload.source === "give") {
+    return "give";
+  }
+
+  if (payload.source === "want" || payload.source === "get") {
+    return "get";
+  }
+
+  return null;
+}
+
+function canSendTrade(give: ResourceCounts, get: ResourceCounts): boolean {
+  return hasAnyResources(give) && hasAnyResources(get);
+}
+
+function canAffordCounts(costs: ResourceCounts, counts: ResourceCounts): boolean {
+  return RESOURCE_KINDS.every(
+    (resource) => resourceCount(costs, resource) <= resourceCount(counts, resource),
+  );
+}
+
+function hasAnyResources(counts: ResourceCounts): boolean {
+  return countResources(counts) > 0;
+}
+
+function countResources(counts: Partial<Record<ResourceKind, number>>): number {
+  return RESOURCE_KINDS.reduce(
+    (total, resource) => total + resourceCount(counts, resource),
+    0,
+  );
+}
+
+function resourceCountsEqual(first: ResourceCounts, second: ResourceCounts): boolean {
+  return RESOURCE_KINDS.every(
+    (resource) => resourceCount(first, resource) === resourceCount(second, resource),
+  );
+}
+
+function randomDicePair(): [number, number] {
+  return [randomDieValue(), randomDieValue()];
+}
+
+function randomAnimatedDicePair(previousValues: [number, number]): [number, number] {
+  return [
+    randomDieValueExcept(previousValues[0]),
+    randomDieValueExcept(previousValues[1]),
+  ];
+}
+
+function randomDieValue(): number {
+  return Math.floor(Math.random() * 6) + 1;
+}
+
+function shuffledPlayerNames(): string[] {
+  const names = [...MOCK_PLAYER_NAME_POOL];
+
+  for (let index = names.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    [names[index], names[swapIndex]] = [names[swapIndex], names[index]];
+  }
+
+  return names;
+}
+
+function randomDieValueExcept(excludedValue: number): number {
+  const nextValue = randomDieValue();
+
+  if (nextValue !== excludedValue) {
+    return nextValue;
+  }
+
+  return (excludedValue % 6) + 1;
+}
+
+function resourceCount(
+  counts: Partial<Record<ResourceKind, number>>,
+  resource: ResourceKind,
+): number {
+  return counts[resource] ?? 0;
+}
+
+function playerById(playerId: PlayerId): MockPlayer | undefined {
+  return MOCK_PLAYERS.find((player) => player.id === playerId);
+}
+
+function pendingPlayerResponses(
+  players: MockPlayer[],
+  senderId: PlayerId,
+): MockTradeResponse[] {
+  return players.filter((player) => player.id !== senderId).map((player) => ({
+    playerId: player.id,
+    state: "pending",
+  }));
+}
+
+function tradeForPerspective(
+  trade: PendingTradeRequest,
+  perspectivePlayerId: PlayerId,
+): { get: ResourceCounts; give: ResourceCounts } {
+  if (trade.senderId === perspectivePlayerId) {
+    return {
+      get: trade.get,
+      give: trade.give,
+    };
+  }
+
+  return {
+    get: trade.give,
+    give: trade.get,
+  };
+}
+
+function responseForPlayer(
+  trade: PendingTradeRequest,
+  playerId: PlayerId,
+): MockTradeResponse | undefined {
+  return trade.responses.find((response) => response.playerId === playerId);
+}
+
+function playerColumnCount(playerCount: number): number {
+  return clamp(playerCount, 1, MAX_PLAYER_COLUMNS);
+}
+
+function playerRegionHeight(metrics: LayoutMetrics, playerCount: number): number {
+  const maxRows = playerRowCount(MAX_PLAYER_COUNT);
+  const activeRows = playerRowCount(playerCount);
+  const totalRowGap = metrics.panelGap * (maxRows - 1);
+  const rowHeight = Math.max(
+    MIN_REGION_SIZE,
+    (metrics.playersHeight - totalRowGap) / maxRows,
+  );
+
+  return activeRows * rowHeight + metrics.panelGap * (activeRows - 1);
+}
+
+function playerRowCount(playerCount: number): number {
+  return Math.max(1, Math.ceil(playerCount / MAX_PLAYER_COLUMNS));
+}
+
+function nextTradeResponseState(state: TradeResponseState): TradeResponseState {
+  switch (state) {
+    case "pending":
+      return "accepted";
+    case "accepted":
+      return "declined";
+    case "declined":
+      return "pending";
+  }
+}
+
+function addResourceCount(counts: ResourceCounts, resource: ResourceKind): ResourceCounts {
+  return {
+    ...counts,
+    [resource]: resourceCount(counts, resource) + 1,
+  };
+}
+
+function removeResourceCount(counts: ResourceCounts, resource: ResourceKind): ResourceCounts {
+  const next = { ...counts };
+  const count = resourceCount(next, resource) - 1;
+
+  if (count > 0) {
+    next[resource] = count;
+  } else {
+    delete next[resource];
+  }
+
+  return next;
+}
+
+function removeResourceAmount(
+  counts: ResourceCounts,
+  resource: ResourceKind,
+  amount: number,
+): ResourceCounts {
+  const next = { ...counts };
+  const count = resourceCount(next, resource) - amount;
+
+  if (count > 0) {
+    next[resource] = count;
+  } else {
+    delete next[resource];
+  }
+
+  return next;
+}
+
+function capResourceCounts(counts: ResourceCounts, limits: ResourceCounts): ResourceCounts {
+  const next: ResourceCounts = {};
+
+  for (const resource of RESOURCE_KINDS) {
+    const count = Math.min(resourceCount(counts, resource), resourceCount(limits, resource));
+
+    if (count > 0) {
+      next[resource] = count;
+    }
+  }
+
+  return next;
+}
+
+function bankTradeRatio(
+  resource: ResourceKind,
+  ports: Partial<Record<PortKind, boolean>>,
+): number {
+  if (ports[resource]) {
+    return 2;
+  }
+
+  if (ports.ThreeToOne) {
+    return 3;
+  }
+
+  return 4;
+}
+
+function bankPaymentOptions(
+  targetResource: ResourceKind,
+  counts: ResourceCounts,
+  ports: Partial<Record<PortKind, boolean>>,
+): BankPaymentOption[] {
+  return RESOURCE_KINDS.filter((resource) => resource !== targetResource).map((resource) => {
+    const cost = bankTradeRatio(resource, ports);
+
+    return {
+      resource,
+      cost,
+      available: resourceCount(counts, resource) >= cost,
+    };
+  });
+}
+
+function clonePlayerHands(hands: PlayerHands): PlayerHands {
+  return Object.fromEntries(
+    Object.entries(hands).map(([playerId, counts]) => [playerId, { ...counts }]),
+  );
+}
+
+function clonePlayerPorts(ports: PlayerPorts): PlayerPorts {
+  return Object.fromEntries(
+    Object.entries(ports).map(([playerId, values]) => [playerId, { ...values }]),
+  );
+}
+
 function defaultLayout(): StoredLayout {
   return {
     version: 6,
@@ -2181,35 +4860,70 @@ function deriveRegions(layout: StoredLayout, visibility: LayoutVisibility): Layo
   const panelGap = metrics.panelGap;
   const leftPanelWidth = Math.max(MIN_REGION_SIZE, leftWidth - panelInset * 2);
   const rightPanelWidth = Math.max(MIN_REGION_SIZE, rightWidth - panelInset * 2);
-  const statusY = panelInset;
-  const playersY = statusY + metrics.statusHeight + panelGap;
-  const tradingY = playersY + metrics.playersHeight + panelGap;
+  const visibleLeftWidth = visibility.tradeOpen ? leftWidth : 0;
+  const effectivePlayersHeight = playerRegionHeight(metrics, visibility.activePlayerCount);
+  const tradingY = panelInset;
   const tradingHeight = Math.max(MIN_REGION_SIZE, mainHeight - tradingY - panelInset);
+  const showBankTrades = visibility.showActions;
   const bankY = tradingY + tradingHeight - metrics.bankTradesHeight;
-  const tradeMainAvailableHeight = Math.max(MIN_REGION_SIZE, bankY - tradingY - panelGap);
+  const tradeMainAvailableHeight = showBankTrades
+    ? Math.max(MIN_REGION_SIZE, bankY - tradingY - panelGap)
+    : tradingHeight;
   const rightToolsY = panelInset;
   const logY = rightToolsY + metrics.rightToolsHeight + panelGap;
-  const expandedLogAvailableHeight = Math.max(
-    MIN_REGION_SIZE,
-    Math.min(metrics.logHeight, mainHeight - logY - panelInset),
+  const rightStackBottom = mainHeight - panelInset;
+  const turnRegionY = mainHeight - metrics.statusHeight;
+  const turnRegionWidth = Math.min(
+    metrics.toastWidth,
+    Math.max(MIN_REGION_SIZE, rightX - visibleLeftWidth),
   );
+  const turnRegionX = rightX - turnRegionWidth;
+  const playersY = rightStackBottom - effectivePlayersHeight;
+  const collapsedLogAvailableHeight = Math.max(MIN_REGION_SIZE, playersY - logY - panelGap);
+  const expandedLogAvailableHeight = Math.max(MIN_REGION_SIZE, mainHeight - logY - panelInset);
   const minimalLogHeight = Math.min(
     metrics.minimalLogHeight,
-    Math.max(MIN_REGION_SIZE, expandedLogAvailableHeight),
+    collapsedLogAvailableHeight,
   );
   const visibleLogHeight = visibility.expandedLogOpen
     ? expandedLogAvailableHeight
     : minimalLogHeight;
-  const toastRight = rightX - panelGap;
+  const toastRight = rightX;
   const toastWidth = metrics.toastWidth;
-  const toastX = Math.max(leftWidth + panelGap, toastRight - toastWidth);
+  const toastX = Math.max(visibleLeftWidth, toastRight - toastWidth);
+  const cheatsY = Math.min(
+    mainHeight - MIN_REGION_SIZE,
+    metrics.toastHeight + panelGap,
+  );
+  const expandedCheatsHeight = Math.min(
+    38,
+    Math.max(MIN_REGION_SIZE, mainHeight - cheatsY),
+  );
+  const cheatsHeight = visibility.cheatsCollapsed
+    ? Math.min(
+        expandedCheatsHeight,
+        Math.max(MIN_REGION_SIZE, CHEATS_COLLAPSED_HEIGHT),
+      )
+    : expandedCheatsHeight;
+  const pendingTradesX = visibleLeftWidth;
+  const pendingTradesWidth = Math.min(
+    metrics.pendingTradesWidth,
+    Math.max(MIN_REGION_SIZE, rightX - pendingTradesX - toastWidth),
+  );
   const selfY = mainHeight;
   const selfItemY = selfY + metrics.bottomInset;
   const selfItemHeight = Math.max(MIN_REGION_SIZE, metrics.selfHeight - metrics.bottomInset * 2);
   const tradeX = metrics.bottomInset;
-  const actionsX = 100 - metrics.bottomInset - metrics.actionsWidth;
-  const handX = tradeX + metrics.tradeButtonWidth + metrics.panelGap;
-  const handRight = actionsX - metrics.panelGap;
+  const actionsX = visibility.showActions ? rightX : 100 - metrics.bottomInset;
+  const actionAreaWidth = visibility.showActions
+    ? Math.max(MIN_REGION_SIZE, 100 - metrics.bottomInset - actionsX)
+    : metrics.actionsWidth;
+  const handX = visibility.showTradeShortcut
+    ? tradeX + metrics.tradeButtonWidth + metrics.panelGap
+    : metrics.bottomInset;
+  const handRight = visibility.showActions
+    ? actionsX - metrics.panelGap
+    : 100 - metrics.bottomInset;
   const handWidth = Math.max(MIN_REGION_SIZE, handRight - handX);
 
   const frames: Record<RegionId, LayoutFrame> = {
@@ -2218,8 +4932,20 @@ function deriveRegions(layout: StoredLayout, visibility: LayoutVisibility): Layo
     "right-ui-region": frame(rightX, 0, rightWidth, mainHeight),
     self: frame(0, selfY, 100, metrics.selfHeight),
     "toast-region": frame(toastX, 0, toastWidth, metrics.toastHeight),
-    status: frame(panelInset, statusY, leftPanelWidth, metrics.statusHeight),
-    players: frame(panelInset, playersY, leftPanelWidth, metrics.playersHeight),
+    cheats: frame(toastX, cheatsY, toastWidth, cheatsHeight),
+    "pending-trades": frame(
+      pendingTradesX,
+      0,
+      pendingTradesWidth,
+      mainHeight,
+    ),
+    players: frame(rightX + panelInset, playersY, rightPanelWidth, effectivePlayersHeight),
+    "turn-region": frame(
+      turnRegionX,
+      turnRegionY,
+      turnRegionWidth,
+      metrics.statusHeight,
+    ),
     trading: frame(panelInset, tradingY, leftPanelWidth, tradingHeight),
     "trade-main": frame(
       panelInset,
@@ -2254,19 +4980,33 @@ function deriveRegions(layout: StoredLayout, visibility: LayoutVisibility): Layo
       selfItemHeight,
     ),
     hand: frame(handX, selfItemY, handWidth, selfItemHeight),
-    actions: frame(actionsX, selfItemY, metrics.actionsWidth, selfItemHeight),
+    actions: frame(actionsX, selfItemY, actionAreaWidth, selfItemHeight),
   };
 
   const hiddenRegions = new Set<RegionId>();
 
   if (!visibility.tradeOpen) {
+    hiddenRegions.add("left-ui-region");
     hiddenRegions.add("trading");
     hiddenRegions.add("trade-main");
     hiddenRegions.add("bank-trades");
   }
 
+  if (!showBankTrades) {
+    hiddenRegions.add("bank-trades");
+  }
+
+  if (!visibility.showTradeShortcut) {
+    hiddenRegions.add("trade-button");
+  }
+
+  if (!visibility.showActions) {
+    hiddenRegions.add("actions");
+  }
+
   if (visibility.expandedLogOpen) {
     hiddenRegions.add("minimal-log");
+    hiddenRegions.add("players");
   } else {
     hiddenRegions.add("expanded-log");
   }
@@ -2302,30 +5042,38 @@ function sanitizeMetrics(metrics: LayoutMetrics): LayoutMetrics {
 
   const mainHeight = 100 - selfHeight;
   const bankTradesHeight = clamp(metrics.bankTradesHeight, 5.5, 12);
-  const playerRows = Math.max(1, Math.ceil(MOCK_PLAYERS.length / 4));
+  const playerRows = Math.max(1, Math.ceil(MAX_PLAYER_COUNT / MAX_PLAYER_COLUMNS));
   const minPlayersHeight = Math.max(9, playerRows * 12 + (playerRows - 1) * panelGap);
-  const minTradingHeight = bankTradesHeight + panelGap + MIN_REGION_SIZE;
-  const maxStatusHeight = Math.max(
-    4,
-    mainHeight - panelInset * 2 - panelGap * 2 - minPlayersHeight - minTradingHeight,
+  const rightToolsHeight = clamp(metrics.rightToolsHeight, 4, 10);
+  const minCollapsedLogHeight = 8;
+  const rightStackAvailable = Math.max(
+    minCollapsedLogHeight + 4 + minPlayersHeight,
+    mainHeight - panelInset * 2 - rightToolsHeight - panelGap * 3,
   );
-  const statusHeight = clamp(metrics.statusHeight, 4, Math.min(10, maxStatusHeight));
+  const maxStatusHeight = Math.max(
+    7,
+    rightStackAvailable - minPlayersHeight - minCollapsedLogHeight,
+  );
+  const statusHeight = clamp(metrics.statusHeight, 7, Math.min(12, maxStatusHeight));
   const maxPlayersHeight = Math.max(
     minPlayersHeight,
-    mainHeight - panelInset * 2 - panelGap * 2 - statusHeight - minTradingHeight,
+    rightStackAvailable - statusHeight - minCollapsedLogHeight,
   );
   const playersHeight = clamp(
     metrics.playersHeight,
     minPlayersHeight,
     Math.min(28, maxPlayersHeight),
   );
-  const rightToolsHeight = clamp(metrics.rightToolsHeight, 4, 10);
-  const maxLogHeight = Math.max(12, mainHeight - panelInset * 2 - panelGap - rightToolsHeight);
+  const collapsedLogAvailableHeight = Math.max(
+    minCollapsedLogHeight,
+    rightStackAvailable - statusHeight - playersHeight,
+  );
+  const maxLogHeight = Math.max(16, mainHeight - panelInset * 2 - panelGap - rightToolsHeight);
   const logHeight = clamp(metrics.logHeight, 16, maxLogHeight);
   const minimalLogHeight = clamp(
     metrics.minimalLogHeight,
-    8,
-    Math.min(24, Math.max(8, logHeight)),
+    minCollapsedLogHeight,
+    Math.min(24, collapsedLogAvailableHeight),
   );
   const maxSelfItemWidth = 100 - bottomInset * 2 - panelGap * 2 - MIN_REGION_SIZE;
   let tradeButtonWidth = clamp(metrics.tradeButtonWidth, 8, Math.min(24, maxSelfItemWidth));
@@ -2342,9 +5090,14 @@ function sanitizeMetrics(metrics: LayoutMetrics): LayoutMetrics {
     tradeButtonWidth = Math.max(8, maxSelfItemWidth - actionsWidth - panelGap * 2);
   }
 
-  const centerGapWidth = Math.max(12, 100 - leftWidth - rightWidth - panelGap * 2);
-  const toastWidth = clamp(metrics.toastWidth, 12, Math.min(32, centerGapWidth));
+  const centerGapWidth = Math.max(22, 100 - leftWidth - rightWidth);
+  const toastWidth = clamp(metrics.toastWidth, 10, Math.min(18, centerGapWidth - 12));
   const toastHeight = clamp(metrics.toastHeight, 10, Math.max(10, mainHeight));
+  const pendingTradesWidth = clamp(
+    metrics.pendingTradesWidth,
+    12,
+    Math.min(36, centerGapWidth - toastWidth),
+  );
 
   return {
     selfHeight,
@@ -2363,6 +5116,7 @@ function sanitizeMetrics(metrics: LayoutMetrics): LayoutMetrics {
     actionsWidth,
     toastWidth,
     toastHeight,
+    pendingTradesWidth,
   };
 }
 
@@ -2380,12 +5134,13 @@ function metricsForDrag(state: DragState, event: PointerEvent): LayoutMetrics {
   const metrics = sanitizeMetrics(state.startMetrics);
   const mainHeight = 100 - metrics.selfHeight;
   const rightX = 100 - metrics.rightWidth;
-  const statusY = metrics.panelInset;
-  const playersY = statusY + metrics.statusHeight + metrics.panelGap;
   const tradingBottom = mainHeight - metrics.panelInset;
   const rightToolsY = metrics.panelInset;
   const logY = rightToolsY + metrics.rightToolsHeight + metrics.panelGap;
-  const toastRight = rightX - metrics.panelGap;
+  const turnRegionBottom = mainHeight;
+  const playersBottom = mainHeight - metrics.panelInset;
+  const toastRight = rightX;
+  const pendingTradesX = metrics.leftWidth;
 
   switch (state.regionId) {
     case "left-ui-region":
@@ -2403,14 +5158,14 @@ function metricsForDrag(state: DragState, event: PointerEvent): LayoutMetrics {
         metrics.selfHeight = 100 - yPercent;
       }
       break;
-    case "status":
-      if (state.handle === "s") {
-        metrics.statusHeight = yPercent - metrics.panelInset;
+    case "turn-region":
+      if (state.handle === "n") {
+        metrics.statusHeight = turnRegionBottom - yPercent;
       }
       break;
     case "players":
-      if (state.handle === "s") {
-        metrics.playersHeight = yPercent - playersY;
+      if (state.handle === "n") {
+        metrics.playersHeight = playersBottom - yPercent;
       }
       break;
     case "right-tools":
@@ -2419,19 +5174,12 @@ function metricsForDrag(state: DragState, event: PointerEvent): LayoutMetrics {
       }
       break;
     case "log":
-      if (state.handle === "s") {
-        metrics.logHeight = yPercent - logY;
-      }
-      break;
     case "minimal-log":
       if (state.handle === "s") {
         metrics.minimalLogHeight = yPercent - logY;
       }
       break;
     case "expanded-log":
-      if (state.handle === "s") {
-        metrics.logHeight = yPercent - logY;
-      }
       break;
     case "bank-trades":
       if (state.handle === "n") {
@@ -2446,6 +5194,11 @@ function metricsForDrag(state: DragState, event: PointerEvent): LayoutMetrics {
         metrics.toastHeight = yPercent;
       }
       break;
+    case "pending-trades":
+      if (state.handle === "e") {
+        metrics.pendingTradesWidth = xPercent - pendingTradesX;
+      }
+      break;
     case "trade-button":
       if (state.handle === "e") {
         metrics.tradeButtonWidth = xPercent - metrics.bottomInset;
@@ -2453,9 +5206,10 @@ function metricsForDrag(state: DragState, event: PointerEvent): LayoutMetrics {
       break;
     case "actions":
       if (state.handle === "w") {
-        metrics.actionsWidth = 100 - metrics.bottomInset - xPercent;
+        metrics.rightWidth = 100 - xPercent;
       }
       break;
+    case "cheats":
     case "board":
     case "trading":
     case "trade-main":
@@ -2474,26 +5228,30 @@ function controlsForRegion(regionId: RegionId): LayoutMetricField[] {
       return ["rightWidth"];
     case "self":
       return ["selfHeight"];
-    case "status":
+    case "turn-region":
       return ["statusHeight"];
     case "players":
       return ["playersHeight"];
     case "right-tools":
       return ["rightToolsHeight"];
     case "log":
-      return ["logHeight"];
+      return ["minimalLogHeight"];
     case "minimal-log":
       return ["minimalLogHeight"];
     case "expanded-log":
-      return ["logHeight"];
+      return [];
     case "bank-trades":
       return ["bankTradesHeight"];
     case "toast-region":
       return ["toastWidth", "toastHeight"];
+    case "cheats":
+      return [];
+    case "pending-trades":
+      return ["pendingTradesWidth"];
     case "trade-button":
       return ["tradeButtonWidth"];
     case "actions":
-      return ["actionsWidth"];
+      return ["rightWidth"];
     case "board":
     case "trading":
     case "trade-main":
@@ -2505,6 +5263,7 @@ function controlsForRegion(regionId: RegionId): LayoutMetricField[] {
 function resizeHandlesFor(regionId: RegionId): ResizeHandle[] {
   switch (regionId) {
     case "left-ui-region":
+    case "pending-trades":
     case "trade-button":
       return ["e"];
     case "right-ui-region":
@@ -2512,14 +5271,16 @@ function resizeHandlesFor(regionId: RegionId): ResizeHandle[] {
       return ["w"];
     case "self":
     case "bank-trades":
-      return ["n"];
-    case "status":
+    case "turn-region":
     case "players":
+      return ["n"];
     case "right-tools":
     case "log":
     case "minimal-log":
-    case "expanded-log":
       return ["s"];
+    case "expanded-log":
+    case "cheats":
+      return [];
     case "toast-region":
       return ["w", "s"];
     case "board":
