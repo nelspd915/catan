@@ -18,6 +18,10 @@ git clone https://github.com/nelspd915/catan.git
 cd catan
 ```
 
+## Architecture
+
+- [Game Communication Protocol](docs/communication-protocol.md)
+
 ## Frontend (Vite + Lit Components)
 
 1. Navigate to the frontend directory and install dependencies:
